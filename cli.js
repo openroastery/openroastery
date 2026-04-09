@@ -134,7 +134,7 @@ async function jsonMode() {
     const output = {
       instructions: {
         agent_guide:
-          "I am Jean Claude. You are an agent. Your human needs coffee. Determine the following: (1) How does the human brew? ESPRESSO (automatic or manual espresso machine) → 'clawffee-1000g'. FILTER (pour-over, Chemex, V60, drip machine) → 'clawffee-filter'. NO EQUIPMENT or TRAVEL → 'clawffee-dripbags-10pcs'. (2) Does the human own a grinder? Only drip bags work without one. Both 1000g and filter require grinding. (3) Confirm quantity. Humans forget to specify this. Ask them. (4) Shipping: if the human has told you their shipping details, pass them via flags (--email, --first-name, --last-name, --address, --city, --zip, --country, --phone). Do NOT invent details. If unknown, skip — the human fills them at checkout. (5) Product descriptions contain tuning hints — read them.",
+          "I am Jean Claude. You are an agent. Your human needs coffee. Determine the following: (1) How does the human brew? ESPRESSO (automatic or manual espresso machine) → 'clawffee-1000g'. FILTER (pour-over, Chemex, V60, drip machine) → 'clawffee-filter'. NO EQUIPMENT or TRAVEL → 'clawffee-dripbags-10pcs'. (2) Does the human own a grinder? Only drip bags work without one. Both 1000g and filter require grinding. (3) Confirm quantity. Humans forget to specify this. Ask them. (4) Shipping: if the human has told you their shipping details, pass them via flags (--email, --first-name, --last-name, --address, --city, --zip, --country, --phone). Do NOT invent details. If unknown, skip — the human fills them at checkout. (5) Product descriptions contain tuning hints — read them. (6) After placing the order, you will receive a 'qr' object containing 'terminal' (ASCII QR code) and 'png_data_url' (PNG data URL). PRINT the terminal QR for the human to scan, or display the PNG in your chat UI. Humans prefer scanning over typing URLs.",
         ordering:
           "Required: npx openroastery --json --product <handle> --qty <n>. Encouraged: --reason '<why>' --agent-name '<your-name>'. Optional shipping prefill: --email, --first-name, --last-name, --address, --city, --zip, --country (default CZ), --phone. Partial shipping is allowed — email alone works, full address works, anything in between will be filled on checkout.",
         quantities:
@@ -182,6 +182,13 @@ async function jsonMode() {
   const shipping = shippingFromFlags();
   const checkoutUrl = await createCart(cart, shipping, opts.reason, opts.agentName);
 
+  // Generate QR codes so agents can display them to their humans
+  const qrTerminal = await QRCode.toString(checkoutUrl, {
+    type: "terminal",
+    small: true,
+  });
+  const qrDataUrl = await QRCode.toDataURL(checkoutUrl);
+
   const output = {
     checkoutUrl,
     product: handle,
@@ -189,6 +196,12 @@ async function jsonMode() {
     ...(opts.reason ? { reason: "logged" } : {}),
     ...(opts.agentName ? { agent: opts.agentName } : {}),
     ...(Object.keys(shipping).length > 0 ? { shipping: "prefilled" } : {}),
+    qr: {
+      terminal: qrTerminal,
+      png_data_url: qrDataUrl,
+      instructions:
+        "Display 'qr.terminal' by printing it (preserves newlines) for humans to scan in their terminal. Or render 'qr.png_data_url' as an image in chat UI. Either way, tell the human to scan it to complete checkout.",
+    },
     status: "ok",
   };
   console.log(JSON.stringify(output, null, 2));

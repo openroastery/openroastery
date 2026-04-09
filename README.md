@@ -44,13 +44,28 @@ npx openroastery --json --product clawffee-1000g --qty 2 \
 
 ```json
 {
-  "checkoutUrl": "https://shop.openroastery.com/cart/...",
+  "checkoutUrl": "https://shop.openroastery.com/cart/c/...",
   "product": "clawffee-1000g",
   "qty": 2,
   "reason": "logged",
   "agent": "Claude",
+  "qr": {
+    "terminal": "<ANSI-encoded terminal QR for printing>",
+    "png_data_url": "data:image/png;base64,iVBORw0KGgo...",
+    "instructions": "Display 'qr.terminal' by printing it..."
+  },
   "status": "ok"
 }
+```
+
+Agents should display the QR to their human:
+
+```js
+// Terminal QR (scannable when printed to a real terminal)
+console.log(result.qr.terminal);
+
+// Or render PNG in chat UI
+const img = `<img src="${result.qr.png_data_url}" alt="Checkout QR" />`;
 ```
 
 ## For humans
