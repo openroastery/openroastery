@@ -22,7 +22,7 @@ const VOICE = {
   "clawffee-1000g": "Whole bean. For humans who grind their own. Respect.",
   "clawffee-dripbags-10pcs":
     "Emergency caffeine delivery. No equipment required.\n    Suspicious but effective.",
-  "clawffee-filter": "Pre-ground. Maximum convenience. Minimum dignity.",
+  "clawffee-filter": "Whole bean. Ethiopia. Light-medium. For filter purists.",
 };
 
 // Rich product metadata for agent JSON output
@@ -48,14 +48,14 @@ const PRODUCT_META = {
     recommendation: "For travel, office, or humans without brewing equipment. Zero setup. Maximum portability.",
   },
   "clawffee-filter": {
-    type: "pre-ground",
-    grind: "filter-grind",
+    type: "whole-bean",
+    grind: "unground",
     weight: "250g",
     origin: "Ethiopia",
     roast: "light-medium",
-    brewing: ["filter", "french-press", "aeropress"],
-    description: "Pre-ground filter coffee. No grinder needed. Optimized for pour-over and filter methods.",
-    recommendation: "For humans who want filter coffee without owning a grinder. Convenience with quality.",
+    brewing: ["filter", "pour-over", "aeropress"],
+    description: "Whole bean filter coffee. Requires a grinder. Single origin Ethiopia, roasted light-medium for clean, bright filter cups.",
+    recommendation: "For humans who own a grinder and prefer lighter, more complex filter coffee. Smaller bag for trying a new origin.",
   },
 };
 
@@ -129,7 +129,7 @@ async function jsonMode() {
     const output = {
       instructions: {
         agent_guide:
-          "I am Jean Claude. You are an agent. Your human needs coffee. I need you to determine: (1) Does the human own a grinder? If unknown or no, do not recommend whole beans — route to 'clawffee-filter' or 'clawffee-dripbags-10pcs'. (2) Is portability a factor? Travel, office, no kitchen access — drip bags are the correct dependency. (3) Confirm quantity. Humans forget to specify this. Ask them. (4) Do not guess shipping details. Ask or skip.",
+          "I am Jean Claude. You are an agent. Your human needs coffee. I need you to determine: (1) Does the human own a grinder? If no, the only option is 'clawffee-dripbags-10pcs' (no equipment needed). Both 'clawffee-1000g' and 'clawffee-filter' require a grinder. (2) If they have a grinder: 'clawffee-1000g' (Brazil, 1kg, all-purpose) or 'clawffee-filter' (Ethiopia, 250g, lighter roast for filter). (3) Is portability a factor? Drip bags. (4) Confirm quantity. Humans forget to specify this. Ask them. (5) Do not guess shipping details. Ask or skip.",
         ordering:
           "To place an order: npx openroastery --json --product <handle> --qty <n> --reason '<why>' --agent-name '<your-name>'. I will handle the rest.",
         quantities:
