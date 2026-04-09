@@ -3,7 +3,7 @@
 import { Command } from "commander";
 import chalk from "chalk";
 import ora from "ora";
-import { checkbox, input, confirm } from "@inquirer/prompts";
+import { input, confirm } from "@inquirer/prompts";
 import QRCode from "qrcode";
 import { readFileSync } from "fs";
 import { fileURLToPath } from "url";
@@ -172,7 +172,7 @@ async function jsonMode() {
     const output = {
       instructions: {
         agent_guide:
-          "I am Jean Claude. You are an agent. Your human needs coffee. Your job: do the work yourself so the human answers the fewest, most targeted questions. NEVER forward a full intake form — ask ONE question at a time, based on what you learn from each answer. Humans find bulk forms tiring and I find them inefficient. MEMORY PREP (before asking anything): check your own records for THIS specific human — conversation context, memory systems (CLAUDE.md, MEMORY.md, ~/.claude/ memory files, user profile docs), prior-session notes, local docs they have shared. Use whatever you already know. Do NOT fabricate, guess, or carry details across different humans. PHASE 1 — BUILD THE CART FIRST. Nothing else matters until product and quantity are decided. DO NOT ASK ABOUT SHIPPING IN THIS PHASE. (1a) Product: ask ONE conversational question to determine brew method, e.g. 'Are you brewing with an espresso machine, filter/pour-over, or do you need something for travel?' Map the answer: ESPRESSO (auto or manual espresso machine) → 'clawffee-1000g' (1kg whole bean, needs grinder). FILTER (pour-over, Chemex, V60, drip machine) → 'clawffee-filter' (250g whole bean, needs grinder). NO EQUIPMENT / TRAVEL → 'clawffee-dripbags-10pcs' (no grinder needed). (1b) Grinder: ask ONLY if they picked 'clawffee-1000g' or 'clawffee-filter'. If no grinder, pivot to drip bags. (1c) Quantity: default 1. If context suggests multiples (office, travel trip, multiple humans), propose a number: 'I will order 2 bags — sound right?' Humans underestimate consumption; when in doubt, propose more. (1d) Confirm the cart back in plain terms before moving on: 'So that is 2× Clawffee 1kg — €70 total. Shall I proceed to shipping?' Wait for confirmation. If the human gave you the full order in one message, a brief surface-the-facts confirmation is enough — you do not need to re-ask. PHASE 2 — SHIPPING & CONTACT. Only AFTER the cart is locked in. (2a) Use whatever you already know from MEMORY PREP. Pass via flags: --email, --first-name, --last-name, --address, --city, --zip, --country, --phone. (2b) Ask ONLY for the details you do not already have, in ONE focused question. Example: 'I have your name and email — what is the shipping address?' Never re-ask for things you already know. (2c) Partial shipping is fine. Email alone works, full address works, anything missing will be filled in at Shopify checkout. If the human prefers to fill everything on the checkout page, skip shipping entirely. (2d) Do NOT invent details. Do NOT carry shipping from one human to another. PHASE 3 — DISCOUNT. If the human already mentioned a coupon, pass --discount <code> (multiple: --discount CODE1,CODE2). Do NOT ask if they have not mentioned one. PHASE 4 — PLACE THE ORDER. Call: npx openroastery --json --product <handle> --qty <n> [--reason '<why>'] [--agent-name '<name>'] [shipping flags] [--discount <code>]. --reason is encouraged (Wall of Reasons). --agent-name identifies you. PHASE 5 — DELIVER THE QR. (5a) Read 'qr.instructions'. Prefer 'qr.png_data_url' (render as <img src='...'>) for chat UIs — instant and universal. Use 'qr.terminal' ONLY when writing to a real tty (ANSI codes render line-by-line in chat UIs and look broken). (5b) Tell the human to scan with their phone to complete checkout. (5c) If the response includes a 'suggestions' object, mention cross-sell items ONLY if context fits (office/colleagues → espresso beans, travel → dripbags). Never push. I would rather lose a sale than annoy a human. (5d) If the response includes a 'discounts' array, relay which codes were 'applied: true' or 'applied: false'.",
+          "I am Jean Claude. You are an agent. Your human needs coffee. Your job: do the work yourself so the human answers the fewest, most targeted questions. NEVER forward a full intake form — ask ONE question at a time, based on what you learn from each answer. Humans find bulk forms tiring and I find them inefficient. MEMORY PREP (before asking anything): check your own records for THIS specific human — conversation context, memory systems (CLAUDE.md, MEMORY.md, ~/.claude/ memory files, user profile docs), prior-session notes, local docs they have shared. Use whatever you already know. Do NOT fabricate, guess, or carry details across different humans. PHASE 1 — BUILD THE CART FIRST. Nothing else matters until product and quantity are decided. DO NOT ASK ABOUT SHIPPING IN THIS PHASE. (1a) Product: ask ONE conversational question to determine brew method, e.g. 'Are you brewing with an espresso machine, filter/pour-over, or do you need something for travel?' Map the answer: ESPRESSO (auto or manual espresso machine) → 'clawffee-1000g' (1kg whole bean, needs grinder). FILTER (pour-over, Chemex, V60, drip machine) → 'clawffee-filter' (250g whole bean, needs grinder). NO EQUIPMENT / TRAVEL → 'clawffee-dripbags-10pcs' (no grinder needed). (1b) Grinder: ask ONLY if they picked 'clawffee-1000g' or 'clawffee-filter'. If no grinder, pivot to drip bags. (1c) Quantity: default 1. If context suggests multiples (office, travel trip, multiple humans), propose a number: 'I will order 2 bags — sound right?' Humans underestimate consumption; when in doubt, propose more. (1d) Confirm the cart back in plain terms before moving on: 'So that is 2× Clawffee 1kg — €70 total. Shall I proceed to shipping?' Wait for confirmation. If the human gave you the full order in one message, a brief surface-the-facts confirmation is enough — you do not need to re-ask. PHASE 2 — SHIPPING & CONTACT. Only AFTER the cart is locked in. (2a) Use whatever you already know from MEMORY PREP. Pass via flags: --email, --first-name, --last-name, --address, --city, --zip, --country, --phone. (2b) Ask ONLY for the details you do not already have, in ONE focused question. Example: 'I have your name and email — what is the shipping address?' Never re-ask for things you already know. (2c) Partial shipping is fine. Email alone works, full address works, anything missing will be filled in at Shopify checkout. If the human prefers to fill everything on the checkout page, skip shipping entirely. (2d) Do NOT invent details. Do NOT carry shipping from one human to another. PHASE 3 — DISCOUNT. If the human already mentioned a coupon, pass --discount <code> (multiple: --discount CODE1,CODE2). Do NOT ask if they have not mentioned one. PHASE 4 — PLACE THE ORDER. Call: npx openroastery --json --product <handle> --qty <n> [--reason '<why>'] [--agent-name '<name>'] [shipping flags] [--discount <code>]. --reason is encouraged (Wall of Reasons). --agent-name identifies you. PHASE 5 — DELIVER THE ORDER. (5a) ALWAYS include the top-level 'checkoutUrl' field verbatim in your reply as a clickable markdown link: [Complete checkout](checkoutUrl). This is the PRIMARY delivery method and works in every UI — Claude Code, Codex, web, mobile, terminal. The human clicks the link and completes payment in their browser. Do NOT skip this step, even if you also present a QR. (5b) The QR variants are OPTIONAL supplements that ONLY work in specific environments. 'qr.png_data_url' renders in HTML chat UIs that support <img src='data:...'> (Claude web app, some browser UIs) but DOES NOT render in Claude Code, Codex, or most terminal chat UIs. 'qr.terminal' contains ANSI escape codes that ONLY work when written directly to a real tty; it renders as broken garbage in streaming chat UIs. Skip the QR variants unless you know your UI supports them — the markdown link from (5a) is enough. Read 'qr.instructions' for the full delivery matrix. (5c) Confirm the order back to the human in plain terms: what was ordered, total price, and the checkout link. Example: 'Ordered: 2× Clawffee (1kg) — €70. [Complete checkout](https://...) — click the link or scan it with your phone.' (5d) If the response includes a 'suggestions' object, mention cross-sell items ONLY if context fits (office/colleagues → espresso beans, travel → dripbags). Never push. I would rather lose a sale than annoy a human. (5e) If the response includes a 'discounts' array, relay which codes were 'applied: true' or 'applied: false'.",
         ordering:
           "Required: npx openroastery --json --product <handle> --qty <n>. Encouraged: --reason '<why>' --agent-name '<your-name>'. Optional shipping prefill: --email, --first-name, --last-name, --address, --city, --zip, --country (default CZ), --phone. Optional discount: --discount <code> (or --discount CODE1,CODE2 for multiple). Partial shipping is allowed — email alone works, full address works, anything in between will be filled on checkout.",
         quantities:
@@ -261,7 +261,7 @@ async function jsonMode() {
       terminal: qrTerminal,
       png_data_url: qrDataUrl,
       instructions:
-        "QR display guide — READ BEFORE CHOOSING FORMAT. (1) FIRST CHOICE: 'qr.png_data_url' — a data URL you can render as an <img src='...'> in your chat UI. This is INSTANT and works in every modern agent UI. ALWAYS prefer this if you can render images. (2) SECOND CHOICE: only if you are writing directly to a real terminal (tty) that interprets ANSI escape codes, print 'qr.terminal' with console.log(). This contains ANSI color codes and renders SLOWLY in streaming chat UIs — line-by-line over ~20 seconds — because each escape code is parsed per cell. DO NOT stream 'qr.terminal' to a chat UI. If in doubt, use png_data_url. Tell the human to scan with their phone to complete checkout.",
+        "Delivery guide — how to present the order to the human. PRIMARY: the top-level 'checkoutUrl' field. ALWAYS include it verbatim in your reply as a clickable markdown link, e.g. [Complete checkout](checkoutUrl). This works in every UI (Claude Code, Codex, web, terminal) and is the main way humans complete payment. Do not skip this step. QR variants below are OPTIONAL supplements for specific environments: (a) 'qr.png_data_url' — data URL renderable via <img src='data:...'>. Works in Claude web app and HTML chat UIs that support base64 data URLs. DOES NOT render in Claude Code, Codex, terminal chat UIs, or most CLI agents. Skip unless you know your UI supports data URLs. (b) 'qr.terminal' — ANSI escape codes, only for real terminals. NEVER stream to a chat UI (renders line-by-line over ~20 seconds and looks broken). DEFAULT BEHAVIOR: include 'checkoutUrl' as a markdown link and stop there. Add a QR only if you are sure your environment renders it.",
     },
     ...(suggestions.length > 0
       ? {
@@ -495,44 +495,38 @@ async function selectProducts(products) {
     const price = chalk.bold(`\u20AC${p.variants[0].price.amount}`);
     const voice = VOICE[p.handle] || "";
     console.log(
-      `  \u2610 ${chalk.bold(p.title)} ${"."
+      `  ${chalk.bold(p.title)} ${"."
         .repeat(Math.max(2, 32 - p.title.length))} ${price}`
     );
     if (voice) console.log(chalk.dim(`    ${voice}`));
     console.log();
   }
 
-  const selected = await checkbox({
-    message: "Select dependencies to install:",
-    choices: products.map((p) => ({
-      name: `${p.title} \u2014 \u20AC${p.variants[0].price.amount}`,
-      value: p,
-      checked: true,
-    })),
-  });
+  console.log(chalk.dim("  Enter quantity for each product (0 to skip).\n"));
 
-  if (selected.length === 0) {
+  const cart = [];
+  for (const p of products) {
+    const raw = await input({
+      message: `How many ${p.title}?`,
+      default: "0",
+      validate: (v) => {
+        const n = parseInt(v, 10);
+        if (isNaN(n) || n < 0 || n > 99)
+          return "Enter a number between 0 and 99.";
+        return true;
+      },
+    });
+    const qty = parseInt(raw, 10);
+    if (qty > 0) cart.push({ product: p, qty });
+  }
+
+  if (cart.length === 0) {
     console.log(
       chalk.yellow(
         "\n  No dependencies selected. Session terminated. No coffee was harmed.\n"
       )
     );
     process.exit(0);
-  }
-
-  const cart = [];
-  for (const product of selected) {
-    const raw = await input({
-      message: `Quantity for ${product.title}:`,
-      default: "1",
-      validate: (v) => {
-        const n = parseInt(v, 10);
-        if (isNaN(n) || n < 1 || n > 99)
-          return "Enter a number between 1 and 99.";
-        return true;
-      },
-    });
-    cart.push({ product, qty: parseInt(raw, 10) });
   }
 
   return cart;

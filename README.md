@@ -61,14 +61,19 @@ npx openroastery --json --product clawffee-1000g --qty 2 \
 }
 ```
 
-Agents should display the QR to their human. **Prefer the PNG for chat UIs:**
+Agents should **always present `checkoutUrl` as a clickable markdown link** — that is the primary delivery method and works in every UI:
 
 ```js
-// BEST: Render PNG in chat UI (instant, works everywhere)
+// PRIMARY: present checkoutUrl as a markdown link (works in every UI)
+const reply = `Ordered: 2× Clawffee (1kg) — €70.\n\n[Complete checkout](${result.checkoutUrl})`;
+
+// OPTIONAL supplement: only if your UI renders base64 data URLs in <img>
+// tags (Claude web app, some HTML chat UIs — NOT Claude Code, Codex,
+// or terminal UIs).
 const img = `<img src="${result.qr.png_data_url}" alt="Checkout QR" />`;
 
-// FALLBACK: only for real terminals (ANSI support). DO NOT stream this
-// to a chat UI — it will render line-by-line over ~20 seconds.
+// OPTIONAL supplement: only for real terminals (ANSI support).
+// NEVER stream this to a chat UI — renders line-by-line and looks broken.
 console.log(result.qr.terminal);
 ```
 
