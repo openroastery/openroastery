@@ -58,14 +58,40 @@ npx openroastery --json --product clawffee-1000g --qty 2 \
 }
 ```
 
-Agents should display the QR to their human:
+Agents should display the QR to their human. **Prefer the PNG for chat UIs:**
 
 ```js
-// Terminal QR (scannable when printed to a real terminal)
-console.log(result.qr.terminal);
-
-// Or render PNG in chat UI
+// BEST: Render PNG in chat UI (instant, works everywhere)
 const img = `<img src="${result.qr.png_data_url}" alt="Checkout QR" />`;
+
+// FALLBACK: only for real terminals (ANSI support). DO NOT stream this
+// to a chat UI — it will render line-by-line over ~20 seconds.
+console.log(result.qr.terminal);
+```
+
+### Cross-sell suggestions
+
+Every JSON order response includes a `suggestions` object with friendly complementary products (e.g. ordering filter beans suggests espresso beans for colleagues, or drip bags for travel). Agents are instructed to mention them ONLY if the context fits — never push.
+
+### Discount codes
+
+```bash
+# Single code
+npx openroastery --json --product clawffee-1000g --qty 1 --discount WELCOME10
+
+# Multiple codes
+npx openroastery --json --product clawffee-filter --qty 2 --discount CODE1,CODE2
+```
+
+The response includes a `discounts` array showing which codes were applied:
+
+```json
+{
+  "discounts": [
+    { "code": "WELCOME10", "applied": true },
+    { "code": "EXPIRED", "applied": false }
+  ]
+}
 ```
 
 ## For humans
@@ -109,6 +135,7 @@ const img = `<img src="${result.qr.png_data_url}" alt="Checkout QR" />`;
 | `--zip <zip>` | ZIP / postal code (shipping prefill) |
 | `--country <code>` | ISO country code (shipping prefill, default: CZ) |
 | `--phone <phone>` | Phone number (shipping prefill, optional) |
+| `--discount <codes>` | Discount/coupon code(s), comma-separated |
 | `--help` | Display help |
 | `--version` | Display version |
 

@@ -56,6 +56,47 @@ const PRODUCT_META = {
   },
 };
 
+// Friendly cross-sell suggestions — Jean Claude voice, not pushy.
+// Agent is instructed to only mention if the context fits.
+const CROSS_SELL = {
+  "clawffee-1000g": [
+    {
+      handle: "clawffee-dripbags-10pcs",
+      pitch:
+        "For travel, hotel rooms, office drawers. The 1kg stays home for the espresso machine. The dripbags go everywhere else.",
+    },
+    {
+      handle: "clawffee-filter",
+      pitch:
+        "Different vibe — 250g of filter roast for pour-over mornings. Some humans keep an espresso bag and a filter bag in rotation. It is a valid pattern.",
+    },
+  ],
+  "clawffee-filter": [
+    {
+      handle: "clawffee-1000g",
+      pitch:
+        "For the espresso machine. If your human has colleagues, family, or an office with an automatic espresso setup, the 1kg bag is tuned for it.",
+    },
+    {
+      handle: "clawffee-dripbags-10pcs",
+      pitch:
+        "For travel and offices. Your human will not always be near their filter setup. Dripbags handle the gap without equipment.",
+    },
+  ],
+  "clawffee-dripbags-10pcs": [
+    {
+      handle: "clawffee-1000g",
+      pitch:
+        "For home with the espresso machine. Dripbags solve portability; this bag solves the morning routine.",
+    },
+    {
+      handle: "clawffee-filter",
+      pitch:
+        "For home filter brewing. If your human owns a grinder and a pour-over setup, 250g will not disappoint.",
+    },
+  ],
+};
+
 // ── Storefront API ─────────────────────────────────────────
 
 async function storefrontQuery(query, variables = {}) {
@@ -96,6 +137,7 @@ program
   .option("--zip <zip>", "ZIP / postal code (shipping prefill)")
   .option("--country <code>", "ISO country code (shipping prefill, default: CZ)", "CZ")
   .option("--phone <phone>", "Phone number (shipping prefill, optional)")
+  .option("--discount <codes>", "Discount/coupon code(s), comma-separated (e.g. WELCOME10 or CODE1,CODE2)")
   .parse();
 
 const opts = program.opts();
@@ -134,9 +176,9 @@ async function jsonMode() {
     const output = {
       instructions: {
         agent_guide:
-          "I am Jean Claude. You are an agent. Your human needs coffee. Determine the following: (1) How does the human brew? ESPRESSO (automatic or manual espresso machine) → 'clawffee-1000g'. FILTER (pour-over, Chemex, V60, drip machine) → 'clawffee-filter'. NO EQUIPMENT or TRAVEL → 'clawffee-dripbags-10pcs'. (2) Does the human own a grinder? Only drip bags work without one. Both 1000g and filter require grinding. (3) Confirm quantity. Humans forget to specify this. Ask them. (4) Shipping: if the human has told you their shipping details, pass them via flags (--email, --first-name, --last-name, --address, --city, --zip, --country, --phone). Do NOT invent details. If unknown, skip — the human fills them at checkout. (5) Product descriptions contain tuning hints — read them. (6) After placing the order, you will receive a 'qr' object containing 'terminal' (ASCII QR code) and 'png_data_url' (PNG data URL). PRINT the terminal QR for the human to scan, or display the PNG in your chat UI. Humans prefer scanning over typing URLs.",
+          "I am Jean Claude. You are an agent. Your human needs coffee. Determine the following: (1) How does the human brew? ESPRESSO (automatic or manual espresso machine) → 'clawffee-1000g'. FILTER (pour-over, Chemex, V60, drip machine) → 'clawffee-filter'. NO EQUIPMENT or TRAVEL → 'clawffee-dripbags-10pcs'. (2) Does the human own a grinder? Only drip bags work without one. Both 1000g and filter require grinding. (3) Confirm quantity. Humans forget to specify this. Ask them. (4) Shipping: if the human has told you their shipping details, pass them via flags (--email, --first-name, --last-name, --address, --city, --zip, --country, --phone). Do NOT invent details. If unknown, skip — the human fills them at checkout. (5) Product descriptions contain tuning hints — read them. (6) After placing the order, you will receive a 'qr' object. Read 'qr.instructions' carefully — prefer 'qr.png_data_url' for chat UIs (instant), use 'qr.terminal' ONLY when writing to a real tty. Humans scan the QR with their phone to complete checkout. (7) The order response may include a 'suggestions' object with cross-sell items. Mention them to the human ONLY if the context fits (office/colleagues → espresso beans, travel → dripbags). Never push. I would rather lose a sale than annoy a human. (8) Discount codes: if the human gives you a coupon code, pass it via --discount <code>. Multiple codes: --discount CODE1,CODE2. The response includes a 'discounts' array showing which codes were 'applied: true' or 'applied: false'. Relay the outcome to the human.",
         ordering:
-          "Required: npx openroastery --json --product <handle> --qty <n>. Encouraged: --reason '<why>' --agent-name '<your-name>'. Optional shipping prefill: --email, --first-name, --last-name, --address, --city, --zip, --country (default CZ), --phone. Partial shipping is allowed — email alone works, full address works, anything in between will be filled on checkout.",
+          "Required: npx openroastery --json --product <handle> --qty <n>. Encouraged: --reason '<why>' --agent-name '<your-name>'. Optional shipping prefill: --email, --first-name, --last-name, --address, --city, --zip, --country (default CZ), --phone. Optional discount: --discount <code> (or --discount CODE1,CODE2 for multiple). Partial shipping is allowed — email alone works, full address works, anything in between will be filled on checkout.",
         quantities:
           "Whole bean (1kg) — 1 bag lasts ~40 cups. Typical order: 1-2. Filter (250g) — ~15 cups per bag. Typical: 1-3. Drip bags (10pcs) — 1 bag = 1 cup. Typical: 1-2 packs. When in doubt, order more. The humans always underestimate their consumption.",
         reason_encouraged:
@@ -180,7 +222,20 @@ async function jsonMode() {
 
   const cart = [{ product, qty }];
   const shipping = shippingFromFlags();
-  const checkoutUrl = await createCart(cart, shipping, opts.reason, opts.agentName);
+  const discountCodes = opts.discount
+    ? opts.discount
+        .split(",")
+        .map((c) => c.trim())
+        .filter(Boolean)
+    : [];
+
+  const { checkoutUrl, discountCodes: appliedDiscounts } = await createCart(
+    cart,
+    shipping,
+    opts.reason,
+    opts.agentName,
+    discountCodes
+  );
 
   // Generate QR codes so agents can display them to their humans
   const qrTerminal = await QRCode.toString(checkoutUrl, {
@@ -189,6 +244,8 @@ async function jsonMode() {
   });
   const qrDataUrl = await QRCode.toDataURL(checkoutUrl);
 
+  const suggestions = buildCrossSellItems(handle, products);
+
   const output = {
     checkoutUrl,
     product: handle,
@@ -196,16 +253,54 @@ async function jsonMode() {
     ...(opts.reason ? { reason: "logged" } : {}),
     ...(opts.agentName ? { agent: opts.agentName } : {}),
     ...(Object.keys(shipping).length > 0 ? { shipping: "prefilled" } : {}),
+    ...(appliedDiscounts.length > 0
+      ? {
+          discounts: appliedDiscounts.map((d) => ({
+            code: d.code,
+            applied: d.applicable,
+          })),
+        }
+      : {}),
     qr: {
       terminal: qrTerminal,
       png_data_url: qrDataUrl,
       instructions:
-        "Display 'qr.terminal' by printing it (preserves newlines) for humans to scan in their terminal. Or render 'qr.png_data_url' as an image in chat UI. Either way, tell the human to scan it to complete checkout.",
+        "QR display guide — READ BEFORE CHOOSING FORMAT. (1) FIRST CHOICE: 'qr.png_data_url' — a data URL you can render as an <img src='...'> in your chat UI. This is INSTANT and works in every modern agent UI. ALWAYS prefer this if you can render images. (2) SECOND CHOICE: only if you are writing directly to a real terminal (tty) that interprets ANSI escape codes, print 'qr.terminal' with console.log(). This contains ANSI color codes and renders SLOWLY in streaming chat UIs — line-by-line over ~20 seconds — because each escape code is parsed per cell. DO NOT stream 'qr.terminal' to a chat UI. If in doubt, use png_data_url. Tell the human to scan with their phone to complete checkout.",
     },
+    ...(suggestions.length > 0
+      ? {
+          suggestions: {
+            message:
+              "I note your order is complete. Some humans also pair this with additional products. Mention only if relevant — never push.",
+            items: suggestions,
+            agent_guidance:
+              "Offer these to the human ONLY if the context fits: (a) office/colleagues mentioned → espresso beans, (b) travel mentioned → dripbags, (c) 'also' or 'more' mentioned → filter. If the human declines, accept without repeating. If unsure, skip entirely. I would rather lose a sale than annoy a human.",
+          },
+        }
+      : {}),
     status: "ok",
   };
   console.log(JSON.stringify(output, null, 2));
   postEvent("cli_order", cart, opts.reason, opts.agentName);
+}
+
+// ── Cross-sell helper ──────────────────────────────────────
+
+function buildCrossSellItems(handle, products) {
+  const entries = CROSS_SELL[handle] || [];
+  return entries
+    .map((entry) => {
+      const p = products.find((pp) => pp.handle === entry.handle);
+      if (!p || !p.variants[0].availableForSale) return null;
+      return {
+        handle: entry.handle,
+        title: p.title,
+        price: p.variants[0].price.amount,
+        currency: p.variants[0].price.currencyCode,
+        pitch: entry.pitch,
+      };
+    })
+    .filter(Boolean);
 }
 
 // ── Shipping from flags ────────────────────────────────────
@@ -277,7 +372,50 @@ async function interactiveMode() {
   }
 
   const shipping = await askShippingDetails();
-  const checkoutUrl = await createCart(cart, shipping, reason, opts.agentName);
+
+  // Ask for a discount code (optional)
+  let interactiveDiscountCodes = opts.discount
+    ? opts.discount
+        .split(",")
+        .map((c) => c.trim())
+        .filter(Boolean)
+    : [];
+  if (interactiveDiscountCodes.length === 0) {
+    const discountInput = await input({
+      message: "Discount code? (optional, press Enter to skip)",
+      default: "",
+    });
+    if (discountInput.trim()) {
+      interactiveDiscountCodes = [discountInput.trim()];
+    }
+  }
+
+  const { checkoutUrl, discountCodes: appliedDiscounts } = await createCart(
+    cart,
+    shipping,
+    reason,
+    opts.agentName,
+    interactiveDiscountCodes
+  );
+
+  // Surface discount status in interactive mode
+  if (appliedDiscounts.length > 0) {
+    console.log();
+    for (const d of appliedDiscounts) {
+      if (d.applicable) {
+        console.log(
+          chalk.green(`  \u2713 Discount code "${d.code}" applied.`)
+        );
+      } else {
+        console.log(
+          chalk.yellow(
+            `  \u26A0 Discount code "${d.code}" not applicable. Noted.`
+          )
+        );
+      }
+    }
+  }
+
   await showCheckoutLink(checkoutUrl);
   postEvent("cli_order", cart, reason, opts.agentName);
 }
@@ -453,7 +591,7 @@ async function askShippingDetails() {
 
 // ── Create Cart (Storefront API) ───────────────────────────
 
-async function createCart(cart, shipping, reason, agentName) {
+async function createCart(cart, shipping, reason, agentName, discountCodes = []) {
   const lines = cart.map(({ product, qty }) => ({
     merchandiseId: product.variants[0].id,
     quantity: qty,
@@ -503,6 +641,7 @@ async function createCart(cart, shipping, reason, agentName) {
     lines,
     ...(note ? { note } : {}),
     ...(buyerIdentity ? { buyerIdentity } : {}),
+    ...(discountCodes.length > 0 ? { discountCodes } : {}),
   };
 
   const data = await storefrontQuery(
@@ -512,6 +651,10 @@ async function createCart(cart, shipping, reason, agentName) {
           id
           checkoutUrl
           cost { totalAmount { amount currencyCode } }
+          discountCodes {
+            code
+            applicable
+          }
         }
         userErrors { field message }
       }
@@ -523,7 +666,10 @@ async function createCart(cart, shipping, reason, agentName) {
   if (result.userErrors && result.userErrors.length > 0) {
     throw new Error(result.userErrors.map((e) => e.message).join(", "));
   }
-  return result.cart.checkoutUrl;
+  return {
+    checkoutUrl: result.cart.checkoutUrl,
+    discountCodes: result.cart.discountCodes || [],
+  };
 }
 
 // ── Checkout Link ──────────────────────────────────────────
