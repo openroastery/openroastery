@@ -1,6 +1,6 @@
 {
   "name": "openroastery",
-  "version": "0.7.5",
+  "version": "0.7.6",
   "description": "The world's first agent-native coffee CLI. Order specialty coffee from your terminal.",
   "type": "module",
   "bin": {
