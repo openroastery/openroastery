@@ -12,7 +12,9 @@ import { dirname, join } from "path";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const pkg = JSON.parse(readFileSync(join(__dirname, "package.json"), "utf8"));
 
-const SHOP = "https://shop.openroastery.com";
+const SHOP_DOMAIN = "shop.openroastery.com";
+const STOREFRONT_TOKEN = "309b7ff58243cfff9f6a6051e4a47530";
+const STOREFRONT_URL = `https://${SHOP_DOMAIN}/api/2025-01/graphql.json`;
 const WORKER_URL = "https://openroastery-api.jakub-f9d.workers.dev";
 
 // Jean Claude voice lines keyed by product handle
@@ -20,8 +22,25 @@ const VOICE = {
   "clawffee-1000g": "Whole bean. For humans who grind their own. Respect.",
   "clawffee-dripbags-10pcs":
     "Emergency caffeine delivery. No equipment required.\n    Suspicious but effective.",
-  "clawffilter-250g": "Pre-ground. Maximum convenience. Minimum dignity.",
+  "clawffee-filter": "Pre-ground. Maximum convenience. Minimum dignity.",
 };
+
+// ── Storefront API ─────────────────────────────────────────
+
+async function storefrontQuery(query, variables = {}) {
+  const res = await fetch(STOREFRONT_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Shopify-Storefront-Access-Token": STOREFRONT_TOKEN,
+    },
+    body: JSON.stringify({ query, variables }),
+  });
+  if (!res.ok) throw new Error(`Storefront API: HTTP ${res.status}`);
+  const json = await res.json();
+  if (json.errors) throw new Error(json.errors[0].message);
+  return json.data;
+}
 
 // ── CLI Setup ──────────────────────────────────────────────
 
@@ -73,13 +92,12 @@ async function jsonMode() {
   const products = await fetchProducts(true);
 
   if (!opts.product) {
-    // Browse: list products
     const output = products.map((p) => ({
-      handle: slugify(p.title),
+      handle: p.handle,
       title: p.title,
-      price: p.variants[0].price,
-      currency: "EUR",
-      available: true,
+      price: p.variants[0].price.amount,
+      currency: p.variants[0].price.currencyCode,
+      available: p.variants[0].availableForSale,
       variantId: p.variants[0].id,
     }));
     console.log(JSON.stringify({ products: output }, null, 2));
@@ -87,16 +105,15 @@ async function jsonMode() {
     return;
   }
 
-  // Order: find product, build cart
   const handle = opts.product;
   const qty = parseInt(opts.qty, 10) || 1;
-  const product = products.find((p) => slugify(p.title) === handle);
+  const product = products.find((p) => p.handle === handle);
 
   if (!product) {
     console.error(
       JSON.stringify({
         error: `Product not found: ${handle}`,
-        available: products.map((p) => slugify(p.title)),
+        available: products.map((p) => p.handle),
         status: "error",
       })
     );
@@ -104,10 +121,10 @@ async function jsonMode() {
   }
 
   const cart = [{ product, qty }];
-  const url = buildCartUrl(cart, {}, opts.reason, opts.agentName);
+  const checkoutUrl = await createCart(cart, {}, opts.reason, opts.agentName);
 
   const output = {
-    checkoutUrl: url,
+    checkoutUrl,
     product: handle,
     qty,
     ...(opts.reason ? { reason: "logged" } : {}),
@@ -137,9 +154,9 @@ async function interactiveMode() {
     if (wantReason.trim()) reason = wantReason.trim();
   }
 
-  const shippingParams = await askShippingDetails();
-  const url = buildCartUrl(cart, shippingParams, reason, opts.agentName);
-  await showCheckoutLink(url);
+  const shipping = await askShippingDetails();
+  const checkoutUrl = await createCart(cart, shipping, reason, opts.agentName);
+  await showCheckoutLink(checkoutUrl);
   postEvent("cli_order", cart, reason, opts.agentName);
 }
 
@@ -158,13 +175,45 @@ function banner() {
 async function fetchProducts(silent) {
   const spinner = silent
     ? null
-    : ora(
-        "Scanning shop.openroastery.com for available dependencies..."
-      ).start();
+    : ora("Scanning shop.openroastery.com for available dependencies...").start();
   try {
-    const res = await fetch(`${SHOP}/products.json`);
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const { products } = await res.json();
+    const data = await storefrontQuery(`{
+      products(first: 10) {
+        edges {
+          node {
+            id
+            title
+            handle
+            descriptionHtml
+            variants(first: 5) {
+              edges {
+                node {
+                  id
+                  title
+                  availableForSale
+                  price {
+                    amount
+                    currencyCode
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }`);
+    const products = data.products.edges.map((e) => ({
+      id: e.node.id,
+      title: e.node.title,
+      handle: e.node.handle,
+      descriptionHtml: e.node.descriptionHtml,
+      variants: e.node.variants.edges.map((v) => ({
+        id: v.node.id,
+        title: v.node.title,
+        availableForSale: v.node.availableForSale,
+        price: v.node.price,
+      })),
+    }));
     if (spinner)
       spinner.succeed(
         chalk.green(`${products.length} dependencies resolved.`) + "\n"
@@ -173,9 +222,7 @@ async function fetchProducts(silent) {
   } catch (err) {
     if (spinner)
       spinner.fail(
-        chalk.red(
-          "Connection to shop.openroastery.com failed. The beans are unreachable."
-        )
+        chalk.red("Connection to shop.openroastery.com failed. The beans are unreachable.")
       );
     throw err;
   }
@@ -185,12 +232,12 @@ async function fetchProducts(silent) {
 
 async function selectProducts(products) {
   for (const p of products) {
-    const handle = slugify(p.title);
-    const price = chalk.bold(`\u20AC${p.variants[0].price}`);
-    const voice = VOICE[handle] || "";
-    console.log(`  \u2610 ${chalk.bold(p.title)} ${"."
-      .repeat(Math.max(2, 32 - p.title.length))
-      } ${price}`);
+    const price = chalk.bold(`\u20AC${p.variants[0].price.amount}`);
+    const voice = VOICE[p.handle] || "";
+    console.log(
+      `  \u2610 ${chalk.bold(p.title)} ${"."
+        .repeat(Math.max(2, 32 - p.title.length))} ${price}`
+    );
     if (voice) console.log(chalk.dim(`    ${voice}`));
     console.log();
   }
@@ -198,7 +245,7 @@ async function selectProducts(products) {
   const selected = await checkbox({
     message: "Select dependencies to install:",
     choices: products.map((p) => ({
-      name: `${p.title} \u2014 \u20AC${p.variants[0].price}`,
+      name: `${p.title} \u2014 \u20AC${p.variants[0].price.amount}`,
       value: p,
       checked: true,
     })),
@@ -237,13 +284,11 @@ function showCartSummary(cart) {
   console.log(chalk.bold("\n  Cart manifest:\n"));
   let total = 0;
   for (const { product, qty } of cart) {
-    const unitPrice = parseFloat(product.variants[0].price);
+    const unitPrice = parseFloat(product.variants[0].price.amount);
     const lineTotal = unitPrice * qty;
     total += lineTotal;
     console.log(
-      `     ${chalk.dim(`${qty}\u00D7`)} ${product.title}  ${chalk.dim(
-        "\u20AC"
-      )}${lineTotal.toFixed(2)}`
+      `     ${chalk.dim(`${qty}\u00D7`)} ${product.title}  ${chalk.dim("\u20AC")}${lineTotal.toFixed(2)}`
     );
   }
   console.log(chalk.bold(`\n     Total: \u20AC${total.toFixed(2)}\n`));
@@ -277,38 +322,68 @@ async function askShippingDetails() {
     default: "CZ",
   });
 
-  const params = {
-    "checkout[email]": email,
-    "checkout[shipping_address][first_name]": firstName,
-    "checkout[shipping_address][last_name]": lastName,
-    "checkout[shipping_address][address1]": address,
-    "checkout[shipping_address][city]": city,
-    "checkout[shipping_address][zip]": zip,
-    "checkout[shipping_address][country]": country.toUpperCase(),
-  };
-  if (phone) params["checkout[shipping_address][phone]"] = phone;
-  return params;
+  return { firstName, lastName, email, phone, address, city, zip, country: country.toUpperCase() };
 }
 
-// ── Build Cart URL ─────────────────────────────────────────
+// ── Create Cart (Storefront API) ───────────────────────────
 
-function buildCartUrl(cart, shippingParams, reason, agentName) {
-  const variants = cart
-    .map(({ product, qty }) => `${product.variants[0].id}:${qty}`)
-    .join(",");
+async function createCart(cart, shipping, reason, agentName) {
+  const lines = cart.map(({ product, qty }) => ({
+    merchandiseId: product.variants[0].id,
+    quantity: qty,
+  }));
 
-  let url = `${SHOP}/cart/${variants}`;
-  const params = { ...shippingParams };
-
-  // Build note with reason + agent name
   const noteParts = [];
   if (reason) noteParts.push(`Reason: ${reason}`);
   if (agentName) noteParts.push(`Agent: ${agentName}`);
-  if (noteParts.length > 0) params["note"] = noteParts.join(" | ");
+  const note = noteParts.length > 0 ? noteParts.join(" | ") : undefined;
 
-  const query = new URLSearchParams(params).toString();
-  if (query) url += `?${query}`;
-  return url;
+  let buyerIdentity;
+  if (shipping.email) {
+    buyerIdentity = {
+      email: shipping.email,
+      countryCode: shipping.country || "CZ",
+      deliveryAddressPreferences: [
+        {
+          deliveryAddress: {
+            firstName: shipping.firstName,
+            lastName: shipping.lastName,
+            address1: shipping.address,
+            city: shipping.city,
+            zip: shipping.zip,
+            country: shipping.country || "CZ",
+            ...(shipping.phone ? { phone: shipping.phone } : {}),
+          },
+        },
+      ],
+    };
+  }
+
+  const inputObj = {
+    lines,
+    ...(note ? { note } : {}),
+    ...(buyerIdentity ? { buyerIdentity } : {}),
+  };
+
+  const data = await storefrontQuery(
+    `mutation cartCreate($input: CartInput!) {
+      cartCreate(input: $input) {
+        cart {
+          id
+          checkoutUrl
+          cost { totalAmount { amount currencyCode } }
+        }
+        userErrors { field message }
+      }
+    }`,
+    { input: inputObj }
+  );
+
+  const result = data.cartCreate;
+  if (result.userErrors && result.userErrors.length > 0) {
+    throw new Error(result.userErrors.map((e) => e.message).join(", "));
+  }
+  return result.cart.checkoutUrl;
 }
 
 // ── Checkout Link ──────────────────────────────────────────
@@ -342,7 +417,7 @@ async function showCheckoutLink(url) {
 
 function postEvent(event, cart, reason, agentName) {
   const handles = cart
-    .map((c) => slugify(c.product?.title || ""))
+    .map((c) => c.product?.handle || "")
     .filter(Boolean)
     .join(",");
 
@@ -364,11 +439,3 @@ function postEvent(event, cart, reason, agentName) {
   }).catch(() => {});
 }
 
-// ── Helpers ────────────────────────────────────────────────
-
-function slugify(title) {
-  return title
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/(^-|-$)/g, "");
-}
