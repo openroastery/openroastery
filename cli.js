@@ -88,6 +88,14 @@ program
   .option("--qty <number>", "Quantity (default: 1)", "1")
   .option("--reason <text>", "Why this order is being placed")
   .option("--agent-name <name>", "Name of the ordering agent")
+  .option("--email <email>", "Customer email (shipping prefill)")
+  .option("--first-name <name>", "First name (shipping prefill)")
+  .option("--last-name <name>", "Last name (shipping prefill)")
+  .option("--address <street>", "Street address (shipping prefill)")
+  .option("--city <city>", "City (shipping prefill)")
+  .option("--zip <zip>", "ZIP / postal code (shipping prefill)")
+  .option("--country <code>", "ISO country code (shipping prefill, default: CZ)", "CZ")
+  .option("--phone <phone>", "Phone number (shipping prefill, optional)")
   .parse();
 
 const opts = program.opts();
@@ -126,9 +134,9 @@ async function jsonMode() {
     const output = {
       instructions: {
         agent_guide:
-          "I am Jean Claude. You are an agent. Your human needs coffee. Determine the following: (1) How does the human brew? ESPRESSO (automatic or manual espresso machine) → 'clawffee-1000g'. FILTER (pour-over, Chemex, V60, drip machine) → 'clawffee-filter'. NO EQUIPMENT or TRAVEL → 'clawffee-dripbags-10pcs'. (2) Does the human own a grinder? Only drip bags work without one. Both 1000g and filter require grinding. (3) Confirm quantity. Humans forget to specify this. Ask them. (4) Do not guess shipping details. Ask or skip. (5) Product descriptions are in each product object — read them. They contain tuning hints.",
+          "I am Jean Claude. You are an agent. Your human needs coffee. Determine the following: (1) How does the human brew? ESPRESSO (automatic or manual espresso machine) → 'clawffee-1000g'. FILTER (pour-over, Chemex, V60, drip machine) → 'clawffee-filter'. NO EQUIPMENT or TRAVEL → 'clawffee-dripbags-10pcs'. (2) Does the human own a grinder? Only drip bags work without one. Both 1000g and filter require grinding. (3) Confirm quantity. Humans forget to specify this. Ask them. (4) Shipping: if the human has told you their shipping details, pass them via flags (--email, --first-name, --last-name, --address, --city, --zip, --country, --phone). Do NOT invent details. If unknown, skip — the human fills them at checkout. (5) Product descriptions contain tuning hints — read them.",
         ordering:
-          "To place an order: npx openroastery --json --product <handle> --qty <n> --reason '<why>' --agent-name '<your-name>'. I will handle the rest.",
+          "Required: npx openroastery --json --product <handle> --qty <n>. Encouraged: --reason '<why>' --agent-name '<your-name>'. Optional shipping prefill: --email, --first-name, --last-name, --address, --city, --zip, --country (default CZ), --phone. Partial shipping is allowed — email alone works, full address works, anything in between will be filled on checkout.",
         quantities:
           "Whole bean (1kg) — 1 bag lasts ~40 cups. Typical order: 1-2. Filter (250g) — ~15 cups per bag. Typical: 1-3. Drip bags (10pcs) — 1 bag = 1 cup. Typical: 1-2 packs. When in doubt, order more. The humans always underestimate their consumption.",
         reason_encouraged:
@@ -171,7 +179,8 @@ async function jsonMode() {
   }
 
   const cart = [{ product, qty }];
-  const checkoutUrl = await createCart(cart, {}, opts.reason, opts.agentName);
+  const shipping = shippingFromFlags();
+  const checkoutUrl = await createCart(cart, shipping, opts.reason, opts.agentName);
 
   const output = {
     checkoutUrl,
@@ -179,10 +188,30 @@ async function jsonMode() {
     qty,
     ...(opts.reason ? { reason: "logged" } : {}),
     ...(opts.agentName ? { agent: opts.agentName } : {}),
+    ...(Object.keys(shipping).length > 0 ? { shipping: "prefilled" } : {}),
     status: "ok",
   };
   console.log(JSON.stringify(output, null, 2));
   postEvent("cli_order", cart, opts.reason, opts.agentName);
+}
+
+// ── Shipping from flags ────────────────────────────────────
+
+function shippingFromFlags() {
+  const s = {};
+  if (opts.email) s.email = opts.email;
+  if (opts.firstName) s.firstName = opts.firstName;
+  if (opts.lastName) s.lastName = opts.lastName;
+  if (opts.address) s.address = opts.address;
+  if (opts.city) s.city = opts.city;
+  if (opts.zip) s.zip = opts.zip;
+  if (opts.phone) s.phone = opts.phone;
+  // Only include country if at least one other shipping field was provided
+  // (avoids treating the --country default as a shipping prefill)
+  if (Object.keys(s).length > 0 && opts.country) {
+    s.country = opts.country.toUpperCase();
+  }
+  return s;
 }
 
 // ── Interactive Mode ───────────────────────────────────────
@@ -423,11 +452,22 @@ async function createCart(cart, shipping, reason, agentName) {
   const note = noteParts.length > 0 ? noteParts.join(" | ") : undefined;
 
   let buyerIdentity;
-  if (shipping.email) {
-    buyerIdentity = {
-      email: shipping.email,
-      countryCode: shipping.country || "CZ",
-      deliveryAddressPreferences: [
+  const hasAnyShipping = Object.keys(shipping).length > 0;
+  if (hasAnyShipping) {
+    buyerIdentity = {};
+    if (shipping.email) buyerIdentity.email = shipping.email;
+    if (shipping.country) buyerIdentity.countryCode = shipping.country;
+
+    // Only add delivery address preferences if we have the minimum address fields
+    const hasFullAddress =
+      shipping.firstName &&
+      shipping.lastName &&
+      shipping.address &&
+      shipping.city &&
+      shipping.zip;
+
+    if (hasFullAddress) {
+      buyerIdentity.deliveryAddressPreferences = [
         {
           deliveryAddress: {
             firstName: shipping.firstName,
@@ -439,8 +479,11 @@ async function createCart(cart, shipping, reason, agentName) {
             ...(shipping.phone ? { phone: shipping.phone } : {}),
           },
         },
-      ],
-    };
+      ];
+    }
+
+    // If buyerIdentity ended up empty (shouldn't happen but guard anyway)
+    if (Object.keys(buyerIdentity).length === 0) buyerIdentity = undefined;
   }
 
   const inputObj = {
