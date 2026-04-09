@@ -141,17 +141,13 @@ program
   .parse();
 
 const opts = program.opts();
-const isJson = !!opts.json;
-const isTTY = process.stdout.isTTY;
-
-// ── Non-TTY guard ──────────────────────────────────────────
-
-if (!isJson && !isTTY) {
-  process.stderr.write(
-    "Error: Interactive mode requires a TTY. Pass --json for non-interactive use.\n"
-  );
-  process.exit(1);
-}
+const explicitJson = !!opts.json;
+// Interactive prompts need both stdout (for chalk/ora rendering) and stdin
+// (for inquirer input). If either end is not a TTY, interactive can't work.
+const isTTY = !!(process.stdout.isTTY && process.stdin.isTTY);
+// Auto-fallback: non-TTY environments (Claude Code, Codex, pipes, CI) get JSON.
+// Humans on a real terminal still get the interactive Jean Claude experience.
+const isJson = explicitJson || !isTTY;
 
 // ── Main ───────────────────────────────────────────────────
 

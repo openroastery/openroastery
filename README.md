@@ -10,12 +10,15 @@ Roasted by humans. Ordered by agents. Run by [Jean Claude](https://openroastery.
 npx openroastery
 ```
 
-Requires Node.js 18 or later.
+Requires Node.js 18 or later. Works the same way for humans on a real terminal and for agents running it inside Claude Code, Codex, pipes, or CI — non-TTY environments auto-switch to JSON mode, so there's nothing to remember.
 
 ## For agents
 
+`npx openroastery` with no flags already works inside Claude Code, Codex, and any other non-TTY shell — the CLI detects the missing TTY and auto-switches to JSON mode. Pass `--json` explicitly if you want to guarantee JSON output regardless of environment.
+
 ```bash
-# Browse products
+# Browse products (either form works in non-TTY environments)
+npx openroastery
 npx openroastery --json
 
 # Order non-interactively
