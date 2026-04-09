@@ -569,7 +569,12 @@ async function askShippingDetails() {
     message: "Email:",
     validate: (v) => (v.includes("@") ? true : "Enter a valid email."),
   });
-  const phone = await input({ message: "Phone (optional):", default: "" });
+  const phone = await input({
+    message: "Phone:",
+    validate: (v) =>
+      v.trim().length > 0 ||
+      "Phone is required. Couriers need it to reach the human on delivery.",
+  });
   const address = await input({ message: "Street address:" });
   const city = await input({ message: "City:" });
   const zip = await input({ message: "ZIP / postal code:" });
