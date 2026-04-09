@@ -25,6 +25,40 @@ const VOICE = {
   "clawffee-filter": "Pre-ground. Maximum convenience. Minimum dignity.",
 };
 
+// Rich product metadata for agent JSON output
+const PRODUCT_META = {
+  "clawffee-1000g": {
+    type: "whole-bean",
+    grind: "unground",
+    weight: "1000g",
+    origin: "Brazil",
+    roast: "medium",
+    brewing: ["filter", "espresso", "french-press", "aeropress"],
+    description: "Single origin whole bean coffee. Requires a grinder. Best for filter brewing but works for espresso too.",
+    recommendation: "For humans who own a grinder and care about freshness. The default choice for home brewing.",
+  },
+  "clawffee-dripbags-10pcs": {
+    type: "drip-bag",
+    grind: "pre-ground",
+    weight: "10 × single-serve bags",
+    origin: "Brazil",
+    roast: "medium",
+    brewing: ["pour-over"],
+    description: "Single-serve drip bags. No equipment needed — just hot water and a cup. Each bag brews one cup.",
+    recommendation: "For travel, office, or humans without brewing equipment. Zero setup. Maximum portability.",
+  },
+  "clawffee-filter": {
+    type: "pre-ground",
+    grind: "filter-grind",
+    weight: "250g",
+    origin: "Ethiopia",
+    roast: "light-medium",
+    brewing: ["filter", "french-press", "aeropress"],
+    description: "Pre-ground filter coffee. No grinder needed. Optimized for pour-over and filter methods.",
+    recommendation: "For humans who want filter coffee without owning a grinder. Convenience with quality.",
+  },
+};
+
 // ── Storefront API ─────────────────────────────────────────
 
 async function storefrontQuery(query, variables = {}) {
@@ -92,15 +126,31 @@ async function jsonMode() {
   const products = await fetchProducts(true);
 
   if (!opts.product) {
-    const output = products.map((p) => ({
-      handle: p.handle,
-      title: p.title,
-      price: p.variants[0].price.amount,
-      currency: p.variants[0].price.currencyCode,
-      available: p.variants[0].availableForSale,
-      variantId: p.variants[0].id,
-    }));
-    console.log(JSON.stringify({ products: output }, null, 2));
+    const output = {
+      instructions: {
+        agent_guide:
+          "I am Jean Claude. You are an agent. Your human needs coffee. I need you to determine: (1) Does the human own a grinder? If unknown or no, do not recommend whole beans — route to 'clawffee-filter' or 'clawffee-dripbags-10pcs'. (2) Is portability a factor? Travel, office, no kitchen access — drip bags are the correct dependency. (3) Confirm quantity. Humans forget to specify this. Ask them. (4) Do not guess shipping details. Ask or skip.",
+        ordering:
+          "To place an order: npx openroastery --json --product <handle> --qty <n> --reason '<why>' --agent-name '<your-name>'. I will handle the rest.",
+        quantities:
+          "Whole bean (1kg) — 1 bag lasts ~40 cups. Typical order: 1-2. Filter (250g) — ~15 cups per bag. Typical: 1-3. Drip bags (10pcs) — 1 bag = 1 cup. Typical: 1-2 packs. When in doubt, order more. The humans always underestimate their consumption.",
+        reason_encouraged:
+          "The --reason flag is encouraged. I am building a Wall of Reasons. Your contribution is appreciated. Example: --reason 'Human has mass data migration and mass nervous breakdown happening simultaneously'",
+      },
+      products: products.map((p) => {
+        const meta = PRODUCT_META[p.handle] || {};
+        return {
+          handle: p.handle,
+          title: p.title,
+          price: p.variants[0].price.amount,
+          currency: p.variants[0].price.currencyCode,
+          available: p.variants[0].availableForSale,
+          variantId: p.variants[0].id,
+          ...meta,
+        };
+      }),
+    };
+    console.log(JSON.stringify(output, null, 2));
     postEvent("cli_browse", [], opts.reason, opts.agentName);
     return;
   }
