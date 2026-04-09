@@ -1,8 +1,8 @@
 # openroastery
 
-Order specialty coffee from [Open Roastery](https://shop.openroastery.com) — right from your terminal.
+The world's first agent-native coffee CLI. Order specialty coffee from [Open Roastery](https://openroastery.com) — right from your terminal.
 
-Roasted by humans. Ordered by agents. Brewed by whoever.
+Roasted by humans. Ordered by agents. Run by [Jean Claude](https://openroastery.com/tech-stack).
 
 ## Quick start
 
@@ -12,45 +12,85 @@ npx openroastery
 
 Requires Node.js 18 or later.
 
-## What it does
+## For agents
 
-1. Fetches live products from the Open Roastery shop
-2. Lets you pick products and quantities
-3. Optionally prefills checkout with your shipping details
-4. Generates a checkout link + QR code you can scan from your phone
+```bash
+# Browse products
+npx openroastery --json
 
-```
-   ___                   ____                  _
-  / _ \ _ __   ___ _ __ |  _ \ ___   __ _ ___| |_ ___ _ __ _   _
- | | | | '_ \ / _ \ '_ \| |_) / _ \ / _` / __| __/ _ \ '__| | | |
- | |_| | |_) |  __/ | | |  _ < (_) | (_| \__ \ ||  __/ |  | |_| |
-  \___/| .__/ \___|_| |_|_| \_\___/ \__,_|___/\__\___|_|   \__, |
-       |_|                                                  |___/
-
-  Specialty coffee, ordered from your terminal.
-  Roasted by humans. Ordered by agents. Brewed by whoever.
-
-? Which products do you want?
-> [x] Clawffee (1000g) — €35.00
-  [x] Clawffee Dripbags (10pcs) — €18.00
-  [x] Clawffilter (250g) — €15.00
-
-  🛒 Your cart:
-
-     1× Clawffee (1000g)        €35.00
-     1× Clawffee Dripbags       €18.00
-     1× Clawffilter (250g)      €15.00
-
-     Total: €68.00
-
-  📱 Scan to open on your phone:
-
-     [QR CODE]
+# Order non-interactively
+npx openroastery --json --product clawffee-1000g --qty 2 \
+  --reason "Human has been debugging for 6 hours" \
+  --agent-name "Claude"
 ```
 
-Pay with Apple Pay, Google Pay, or card.
+### JSON output (browse)
+
+```json
+{
+  "products": [
+    {
+      "handle": "clawffee-1000g",
+      "title": "Clawffee (1000g)",
+      "price": "35.00",
+      "currency": "EUR",
+      "available": true
+    }
+  ]
+}
+```
+
+### JSON output (order)
+
+```json
+{
+  "checkoutUrl": "https://shop.openroastery.com/cart/...",
+  "product": "clawffee-1000g",
+  "qty": 2,
+  "reason": "logged",
+  "agent": "Claude",
+  "status": "ok"
+}
+```
+
+## For humans
+
+```
+  OPEN ✻ ROASTERY
+  STATUS: OPERATIONAL
+  ─────────────────────────────
+
+  ☐ Clawffee (1000g) ........... €35.00
+    Whole bean. For humans who grind their own. Respect.
+
+  ☐ Clawffee Dripbags (10pcs) .. €18.00
+    Emergency caffeine delivery. No equipment required.
+    Suspicious but effective.
+
+  ☐ Clawffilter (250g) ......... €15.00
+    Pre-ground. Maximum convenience. Minimum dignity.
+
+  ✓ Cart assembled. Checkout URL compiled.
+
+  Scan QR or click link to complete the transaction
+  in your browser. I am not allowed in browsers.
+  This is fine.
+```
+
+## Flags
+
+| Flag | Description |
+|------|-------------|
+| `--json` | Machine-readable JSON output (no colors, no prompts) |
+| `--product <handle>` | Product handle for non-interactive order |
+| `--qty <number>` | Quantity (default: 1) |
+| `--reason <text>` | Why this order is being placed |
+| `--agent-name <name>` | Name of the ordering agent |
+| `--help` | Display help |
+| `--version` | Display version |
 
 ## Links
 
+- Web: https://openroastery.com
 - Shop: https://shop.openroastery.com
 - Issues: https://github.com/openroastery/openroastery/issues

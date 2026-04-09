@@ -1,7 +1,7 @@
 {
   "name": "openroastery",
-  "version": "0.1.0",
-  "description": "Order specialty coffee from Open Roastery — right from your terminal",
+  "version": "0.2.0",
+  "description": "The world's first agent-native coffee CLI. Order specialty coffee from your terminal.",
   "type": "module",
   "bin": {
     "openroastery": "./cli.js"
@@ -25,7 +25,7 @@
     "type": "git",
     "url": "https://github.com/openroastery/openroastery.git"
   },
-  "homepage": "https://shop.openroastery.com",
+  "homepage": "https://openroastery.com",
   "bugs": {
     "url": "https://github.com/openroastery/openroastery/issues"
   },
@@ -36,6 +36,7 @@
   "dependencies": {
     "@inquirer/prompts": "^7.0.0",
     "chalk": "^5.3.0",
+    "commander": "^14.0.3",
     "ora": "^8.1.0",
     "qrcode": "^1.5.4"
   },
