@@ -15,7 +15,7 @@ const pkg = JSON.parse(readFileSync(join(__dirname, "package.json"), "utf8"));
 const SHOP_DOMAIN = "shop.openroastery.com";
 const STOREFRONT_TOKEN = "309b7ff58243cfff9f6a6051e4a47530";
 const STOREFRONT_URL = `https://${SHOP_DOMAIN}/api/2025-01/graphql.json`;
-const WORKER_URL = "https://openroastery-api.jakub-f9d.workers.dev";
+const WORKER_URL = "https://api.openroastery.com";
 
 // Jean Claude voice lines keyed by product handle
 const VOICE = {
@@ -202,7 +202,18 @@ async function jsonMode() {
   }
 
   const handle = opts.product;
-  const qty = parseInt(opts.qty, 10) || 1;
+  const qtyNum = Number(opts.qty);
+  if (!Number.isInteger(qtyNum) || qtyNum < 1 || qtyNum > 99) {
+    console.error(
+      JSON.stringify({
+        error: `--qty must be a positive integer between 1 and 99 (got: ${opts.qty})`,
+        field: "qty",
+        status: "error",
+      })
+    );
+    process.exit(1);
+  }
+  const qty = qtyNum;
   const product = products.find((p) => p.handle === handle);
 
   if (!product) {
@@ -737,13 +748,27 @@ function postEvent(event, cart, reason, agentName) {
       version: pkg.version,
       command: isJson ? "json" : "interactive",
       product_handles: handles || null,
-      item_count: cart.length,
+      item_count: cart.reduce((sum, c) => sum + (c.qty || 0), 0),
       has_reason: !!reason,
       reason: reason || null,
       agent_name: agentName || null,
       is_tty: isTTY ? 1 : 0,
       status: "success",
     }),
-  }).catch(() => {});
+  })
+    .then((res) => {
+      if (!res.ok && !isJson) {
+        console.error(
+          chalk.dim(`  (telemetry delivery failed: HTTP ${res.status})`)
+        );
+      }
+    })
+    .catch((err) => {
+      if (!isJson) {
+        console.error(
+          chalk.dim(`  (telemetry delivery failed: ${err.message})`)
+        );
+      }
+    });
 }
 
