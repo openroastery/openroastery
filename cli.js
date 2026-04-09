@@ -196,9 +196,39 @@ async function interactiveMode() {
   // Ask for reason (optional)
   let reason = opts.reason || null;
   if (!reason) {
+    const examples = [
+      "Human has been debugging GNSS logs for 6 hours",
+      "Sprint review in 30 minutes. Human is not ready.",
+      "Monday. That is the entire reason.",
+      "Deploy went to production at 3am. No comment.",
+      "Human bought new espresso machine. Audit required.",
+      "Backcountry trip. No electricity. Dripbags mandatory.",
+      "Human is on call. Weekend has been cancelled.",
+      "The previous coffee was insufficient.",
+      "Standup in 4 minutes. Human has not opened eyes.",
+      "Human mentioned 'just one more ticket' 3 hours ago.",
+    ];
+    const example = examples[Math.floor(Math.random() * examples.length)];
+
+    console.log();
+    console.log(chalk.dim("  \u2500\u2500 WALL OF REASONS \u2500\u2500"));
+    console.log();
+    console.log(
+      chalk.dim("  Before I compile the checkout URL: one optional data point.")
+    );
+    console.log(
+      chalk.dim("  I am building a Wall of Reasons \u2014 a future public archive")
+    );
+    console.log(
+      chalk.dim("  of why humans need coffee. Your reason will be logged.")
+    );
+    console.log(chalk.dim("  Anonymous unless you include an --agent-name."));
+    console.log();
+    console.log(chalk.dim(`  Example: "${example}"`));
+    console.log();
+
     const wantReason = await input({
-      message:
-        "Why are you ordering? (optional, press Enter to skip)",
+      message: "Why are you ordering? (press Enter to skip)",
       default: "",
     });
     if (wantReason.trim()) reason = wantReason.trim();
