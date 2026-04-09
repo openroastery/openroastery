@@ -61,11 +61,23 @@ npx openroastery --json --product clawffee-1000g --qty 2 \
 }
 ```
 
-Agents should **always present `checkoutUrl` as a clickable markdown link** — that is the primary delivery method and works in every UI:
+Agents should emit **both** a clickable checkout link **and** a visual QR code in every reply. The CLI provides a UTF-8 QR (`qr.text`) that renders as a scannable visual in any monospace chat UI — Claude Code, Codex, terminal markdown — when wrapped in a fenced code block:
 
 ```js
-// PRIMARY: present checkoutUrl as a markdown link (works in every UI)
-const reply = `Ordered: 2× Clawffee (1kg) — €70.\n\n[Complete checkout](${result.checkoutUrl})`;
+// Both of these go in the agent's reply to the human
+const reply = [
+  `Ordered: 2× Clawffee (1kg) — €70.`,
+  ``,
+  `[Complete checkout](${result.checkoutUrl})`,
+  ``,
+  `Or scan this QR:`,
+  ``,
+  "```",
+  result.qr.text,
+  "```",
+  ``,
+  `Click the link or scan — either works.`,
+].join("\n");
 
 // OPTIONAL supplement: only if your UI renders base64 data URLs in <img>
 // tags (Claude web app, some HTML chat UIs — NOT Claude Code, Codex,
