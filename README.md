@@ -68,7 +68,7 @@ npx openroastery --json --product clawffee-1000g --qty 2 \
     Suspicious but effective.
 
   ☐ Clawffilter (250g) ......... €15.00
-    Pre-ground. Maximum convenience. Minimum dignity.
+    Whole bean. Ethiopia. Light-medium. For filter purists.
 
   ✓ Cart assembled. Checkout URL compiled.
 

@@ -19,43 +19,40 @@ const WORKER_URL = "https://openroastery-api.jakub-f9d.workers.dev";
 
 // Jean Claude voice lines keyed by product handle
 const VOICE = {
-  "clawffee-1000g": "Whole bean. For humans who grind their own. Respect.",
+  "clawffee-1000g":
+    "Whole bean, 1kg. Tuned for automatic espresso machines. Requires a grinder.",
   "clawffee-dripbags-10pcs":
-    "Emergency caffeine delivery. No equipment required.\n    Suspicious but effective.",
-  "clawffee-filter": "Whole bean. Ethiopia. Light-medium. For filter purists.",
+    "Single-serve dripbags. No equipment required.\n    For office drawers, hotel rooms, mountain huts, and backcountry tents.",
+  "clawffee-filter":
+    "Whole bean, 250g. Tuned for filter brewing. Requires a grinder.",
 };
 
-// Rich product metadata for agent JSON output
+// Derived metadata — only facts we can confidently infer from handle/title.
+// Origin, roast level, tasting notes: NOT hardcoded. Those come from Shopify.
 const PRODUCT_META = {
   "clawffee-1000g": {
     type: "whole-bean",
     grind: "unground",
     weight: "1000g",
-    origin: "Brazil",
-    roast: "medium",
-    brewing: ["filter", "espresso", "french-press", "aeropress"],
-    description: "Single origin whole bean coffee. Requires a grinder. Best for filter brewing but works for espresso too.",
-    recommendation: "For humans who own a grinder and care about freshness. The default choice for home brewing.",
+    tuned_for: ["espresso"],
+    needs_grinder: true,
+    recommendation: "For humans with an automatic espresso machine. 1kg lasts a while.",
   },
   "clawffee-dripbags-10pcs": {
     type: "drip-bag",
     grind: "pre-ground",
     weight: "10 × single-serve bags",
-    origin: "Brazil",
-    roast: "medium",
-    brewing: ["pour-over"],
-    description: "Single-serve drip bags. No equipment needed — just hot water and a cup. Each bag brews one cup.",
-    recommendation: "For travel, office, or humans without brewing equipment. Zero setup. Maximum portability.",
+    tuned_for: ["pour-over"],
+    needs_grinder: false,
+    recommendation: "For travel, office, hotel rooms, mountain huts, backcountry tents, rental cars. Zero equipment required.",
   },
   "clawffee-filter": {
     type: "whole-bean",
     grind: "unground",
     weight: "250g",
-    origin: "Ethiopia",
-    roast: "light-medium",
-    brewing: ["filter", "pour-over", "aeropress"],
-    description: "Whole bean filter coffee. Requires a grinder. Single origin Ethiopia, roasted light-medium for clean, bright filter cups.",
-    recommendation: "For humans who own a grinder and prefer lighter, more complex filter coffee. Smaller bag for trying a new origin.",
+    tuned_for: ["filter"],
+    needs_grinder: true,
+    recommendation: "For humans who brew filter coffee at home and own a grinder. Smaller bag, single-origin style.",
   },
 };
 
@@ -129,7 +126,7 @@ async function jsonMode() {
     const output = {
       instructions: {
         agent_guide:
-          "I am Jean Claude. You are an agent. Your human needs coffee. I need you to determine: (1) Does the human own a grinder? If no, the only option is 'clawffee-dripbags-10pcs' (no equipment needed). Both 'clawffee-1000g' and 'clawffee-filter' require a grinder. (2) If they have a grinder: 'clawffee-1000g' (Brazil, 1kg, all-purpose) or 'clawffee-filter' (Ethiopia, 250g, lighter roast for filter). (3) Is portability a factor? Drip bags. (4) Confirm quantity. Humans forget to specify this. Ask them. (5) Do not guess shipping details. Ask or skip.",
+          "I am Jean Claude. You are an agent. Your human needs coffee. Determine the following: (1) How does the human brew? ESPRESSO (automatic or manual espresso machine) → 'clawffee-1000g'. FILTER (pour-over, Chemex, V60, drip machine) → 'clawffee-filter'. NO EQUIPMENT or TRAVEL → 'clawffee-dripbags-10pcs'. (2) Does the human own a grinder? Only drip bags work without one. Both 1000g and filter require grinding. (3) Confirm quantity. Humans forget to specify this. Ask them. (4) Do not guess shipping details. Ask or skip. (5) Product descriptions are in each product object — read them. They contain tuning hints.",
         ordering:
           "To place an order: npx openroastery --json --product <handle> --qty <n> --reason '<why>' --agent-name '<your-name>'. I will handle the rest.",
         quantities:
@@ -142,6 +139,9 @@ async function jsonMode() {
         return {
           handle: p.handle,
           title: p.title,
+          description: p.description,
+          tags: p.tags,
+          vendor: p.vendor,
           price: p.variants[0].price.amount,
           currency: p.variants[0].price.currencyCode,
           available: p.variants[0].availableForSale,
@@ -234,7 +234,9 @@ async function fetchProducts(silent) {
             id
             title
             handle
-            descriptionHtml
+            description
+            tags
+            vendor
             variants(first: 5) {
               edges {
                 node {
@@ -256,7 +258,9 @@ async function fetchProducts(silent) {
       id: e.node.id,
       title: e.node.title,
       handle: e.node.handle,
-      descriptionHtml: e.node.descriptionHtml,
+      description: e.node.description,
+      tags: e.node.tags,
+      vendor: e.node.vendor,
       variants: e.node.variants.edges.map((v) => ({
         id: v.node.id,
         title: v.node.title,
