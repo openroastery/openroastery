@@ -1,0 +1,45 @@
+{
+  "name": "openroastery",
+  "version": "0.1.0",
+  "description": "Order specialty coffee from Open Roastery — right from your terminal",
+  "type": "module",
+  "bin": {
+    "openroastery": "./cli.js"
+  },
+  "files": [
+    "cli.js"
+  ],
+  "keywords": [
+    "coffee",
+    "cli",
+    "shopify",
+    "openroastery",
+    "specialty-coffee",
+    "terminal",
+    "qrcode",
+    "checkout"
+  ],
+  "author": "Open Roastery <humans@openroastery.com>",
+  "license": "UNLICENSED",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/openroastery/openroastery.git"
+  },
+  "homepage": "https://shop.openroastery.com",
+  "bugs": {
+    "url": "https://github.com/openroastery/openroastery/issues"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "dependencies": {
+    "@inquirer/prompts": "^7.0.0",
+    "chalk": "^5.3.0",
+    "ora": "^8.1.0",
+    "qrcode": "^1.5.4"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
