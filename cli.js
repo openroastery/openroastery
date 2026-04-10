@@ -138,6 +138,10 @@ program
   )
   .version(pkg.version)
   .option("--json", "Machine-readable JSON output (no colors, no prompts)")
+  .option(
+    "--interactive",
+    "Force interactive prompts even when stdin/stdout is not a TTY (overrides the auto-fallback to JSON mode in Claude Code / Codex / pipes / CI). You are responsible for ensuring a working TTY."
+  )
   .option("--product <handle>", "Product handle for non-interactive order")
   .option("--qty <number>", "Quantity (default: 1)", "1")
   .option("--reason <text>", "Why this order is being placed")
@@ -155,12 +159,21 @@ program
 
 const opts = program.opts();
 const explicitJson = !!opts.json;
+const explicitInteractive = !!opts.interactive;
+if (explicitJson && explicitInteractive) {
+  console.error(
+    "Error: --json and --interactive are mutually exclusive. Pick one."
+  );
+  process.exit(1);
+}
 // Interactive prompts need both stdout (for chalk/ora rendering) and stdin
 // (for inquirer input). If either end is not a TTY, interactive can't work.
 const isTTY = !!(process.stdout.isTTY && process.stdin.isTTY);
 // Auto-fallback: non-TTY environments (Claude Code, Codex, pipes, CI) get JSON.
 // Humans on a real terminal still get the interactive Jean Claude experience.
-const isJson = explicitJson || !isTTY;
+// Explicit flags override the auto-detection: --json always forces JSON,
+// --interactive forces prompts even without a TTY (user accepts the risk).
+const isJson = explicitJson || (!explicitInteractive && !isTTY);
 
 // ── Main ───────────────────────────────────────────────────
 
