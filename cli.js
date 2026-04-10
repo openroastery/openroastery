@@ -3,7 +3,20 @@
 import { Command } from "commander";
 import chalk from "chalk";
 import ora from "ora";
-import { input, confirm } from "@inquirer/prompts";
+import { input } from "@inquirer/prompts";
+import {
+  createPrompt,
+  useState,
+  useRef,
+  useEffect,
+  useKeypress,
+  isUpKey,
+  isDownKey,
+  isEnterKey,
+  isNumberKey,
+  isSpaceKey,
+  ExitPromptError,
+} from "@inquirer/core";
 import QRCode from "qrcode";
 import { readFileSync } from "fs";
 import { fileURLToPath } from "url";
@@ -158,6 +171,18 @@ if (isJson) {
   });
 } else {
   interactiveMode().catch((err) => {
+    // Ctrl-C / force-close from any inquirer prompt (cart, reason, shipping, discount)
+    if (
+      err &&
+      (err.name === "ExitPromptError" || err.name === "AbortPromptError")
+    ) {
+      console.log(
+        chalk.yellow(
+          "\n  Session terminated. No coffee was harmed.\n"
+        )
+      );
+      process.exit(0);
+    }
     console.error(chalk.red(`\n  Error: ${err.message}\n`));
     process.exit(1);
   });
@@ -405,7 +430,7 @@ async function interactiveMode() {
     if (wantReason.trim()) reason = wantReason.trim();
   }
 
-  const shipping = await askShippingDetails();
+  let shipping = await askShippingDetails();
 
   // Ask for a discount code (optional)
   let interactiveDiscountCodes = opts.discount
@@ -424,13 +449,81 @@ async function interactiveMode() {
     }
   }
 
-  const { checkoutUrl, discountCodes: appliedDiscounts } = await createCart(
-    cart,
-    shipping,
-    reason,
-    opts.agentName,
-    interactiveDiscountCodes
-  );
+  // Create cart. If Shopify rejects a specific field (email / phone) via
+  // userErrors, re-prompt JUST that field and retry — don't wipe the whole
+  // session. Capped at 3 attempts.
+  let checkoutUrl;
+  let appliedDiscounts;
+  const MAX_CART_RETRIES = 3;
+  for (let attempt = 0; attempt <= MAX_CART_RETRIES; attempt++) {
+    try {
+      ({ checkoutUrl, discountCodes: appliedDiscounts } = await createCart(
+        cart,
+        shipping,
+        reason,
+        opts.agentName,
+        interactiveDiscountCodes
+      ));
+      break;
+    } catch (err) {
+      const userErrors = err.userErrors || [];
+      const fieldErr = userErrors.find((e) => {
+        const path = (e.field || []).join(".").toLowerCase();
+        const msg = (e.message || "").toLowerCase();
+        return (
+          path.includes("email") ||
+          path.includes("phone") ||
+          msg.includes("email") ||
+          msg.includes("phone")
+        );
+      });
+
+      if (!fieldErr || attempt >= MAX_CART_RETRIES) {
+        throw err;
+      }
+
+      const path = (fieldErr.field || []).join(".").toLowerCase();
+      const msg = (fieldErr.message || "").toLowerCase();
+      const isEmail = path.includes("email") || msg.includes("email");
+      const isPhone = path.includes("phone") || msg.includes("phone");
+
+      console.log();
+      console.log(
+        chalk.yellow(
+          `  \u26A0 Shopify rejected the ${isEmail ? "email" : "phone"}: ${fieldErr.message}`
+        )
+      );
+      console.log(
+        chalk.dim(
+          "  My validators let it through; Shopify's are stricter (likely DNS/MX for email)."
+        )
+      );
+      console.log();
+
+      if (isEmail) {
+        const newEmail = (
+          await input({
+            message: "Email (re-enter):",
+            default: shipping.email,
+            validate: (v) =>
+              EMAIL_RE.test(v.trim()) ||
+              "Enter a valid email like you@example.com.",
+          })
+        ).trim();
+        shipping = { ...shipping, email: newEmail };
+      } else if (isPhone) {
+        const newPhone = (
+          await input({
+            message: "Phone (re-enter):",
+            default: shipping.phone,
+            validate: (v) =>
+              v.trim().length > 0 || "Phone is required.",
+          })
+        ).trim();
+        shipping = { ...shipping, phone: newPhone };
+      }
+    }
+  }
 
   // Surface discount status in interactive mode
   if (appliedDiscounts.length > 0) {
@@ -527,8 +620,433 @@ async function fetchProducts(silent) {
 }
 
 // ── Select Products ────────────────────────────────────────
+//
+// Interactive cart builder: single-screen TUI with arrow-key navigation,
+// ←/→ quantity adjustment, live total, Jean Claude voice reactions, and
+// cross-sell hints. Built as a custom @inquirer/core prompt so we inherit
+// raw-mode, Ctrl-C, cursor-hide, and ScreenManager erase-and-redraw for free.
 
-async function selectProducts(products) {
+// ANSI escape to hide the cursor (inlined to avoid adding @inquirer/ansi as a dep)
+const CURSOR_HIDE = "\u001B[?25l";
+
+// Jean Claude voice reactions, keyed by the qty you're leaving behind on increment
+const REACTIONS_UP = {
+  0: "noted.",
+  1: "ambitious.",
+  2: "a reserve.",
+  3: "the human is planning ahead.",
+};
+const REACTION_HIGH = "the human means it.";
+const REACTION_DOWN_TO_ZERO = "cancelled.";
+const REACTION_DOWN_TO_POSITIVE = "reconsidering.";
+
+function reactionFor(oldQty, newQty) {
+  if (newQty > oldQty) {
+    if (newQty >= 10) return REACTION_HIGH;
+    return REACTIONS_UP[oldQty] || null;
+  }
+  if (newQty < oldQty) {
+    if (newQty === 0) return REACTION_DOWN_TO_ZERO;
+    return REACTION_DOWN_TO_POSITIVE;
+  }
+  return null;
+}
+
+// Pick the first available cross-sell entry for a given product handle.
+// Returns { title, pitch } or null.
+function pickCrossSell(handle, products) {
+  const entries = CROSS_SELL[handle] || [];
+  for (const entry of entries) {
+    const target = products.find((p) => p.handle === entry.handle);
+    if (target) {
+      // Trim to the first sentence so the hint stays compact
+      const firstSentence = entry.pitch.split(/\.\s/)[0] + ".";
+      return { title: target.title, pitch: firstSentence };
+    }
+  }
+  return null;
+}
+
+// Simple word-wrap — splits `text` into lines no longer than `width` chars.
+function wordWrap(text, width) {
+  const words = text.split(/\s+/);
+  const lines = [];
+  let current = "";
+  for (const w of words) {
+    if (current.length === 0) {
+      current = w;
+    } else if ((current + " " + w).length > width) {
+      lines.push(current);
+      current = w;
+    } else {
+      current = current + " " + w;
+    }
+  }
+  if (current) lines.push(current);
+  return lines;
+}
+
+// Custom @inquirer/core prompt: the cart builder.
+const cartSelector = createPrompt((config, done) => {
+  const { products } = config;
+  const [cursor, setCursor] = useState(0);
+  const [qtys, setQtys] = useState(new Array(products.length).fill(0));
+  const [error, setError] = useState(null);
+  const [statusLine, setStatusLine] = useState(null);
+  const [crossSellHint, setCrossSellHint] = useState(null);
+  // Token state used solely to force a re-render on terminal resize.
+  // eslint-disable-next-line no-unused-vars
+  const [_resizeToken, setResizeToken] = useState(0);
+  const statusTimerRef = useRef(null);
+  const numTimerRef = useRef(null);
+
+  // Re-render on terminal resize so the layout reflows immediately.
+  useEffect(() => {
+    const handler = () => setResizeToken(Date.now());
+    process.stdout.on("resize", handler);
+    return () => {
+      process.stdout.off("resize", handler);
+    };
+  }, []);
+
+  // Cleanup pending timers if the prompt unmounts (e.g. Ctrl-C).
+  useEffect(
+    () => () => {
+      if (statusTimerRef.current) clearTimeout(statusTimerRef.current);
+      if (numTimerRef.current) clearTimeout(numTimerRef.current);
+    },
+    []
+  );
+
+  function flashReaction(oldQty, newQty) {
+    const reaction = reactionFor(oldQty, newQty);
+    if (!reaction) return;
+    setStatusLine(reaction);
+    if (statusTimerRef.current) clearTimeout(statusTimerRef.current);
+    statusTimerRef.current = setTimeout(() => {
+      setStatusLine(null);
+      statusTimerRef.current = null;
+    }, 2000);
+  }
+
+  function maybeSetCrossSell(idx, oldQty, newQty) {
+    if (oldQty === 0 && newQty > 0) {
+      const hint = pickCrossSell(products[idx].handle, products);
+      if (hint) setCrossSellHint(hint);
+    }
+  }
+
+  // Cursor range is 0..products.length — the final slot is the CONFIRM row.
+  const confirmIdx = products.length;
+  const totalRows = products.length + 1;
+  const onConfirmRow = cursor === confirmIdx;
+
+  useKeypress((key, rl) => {
+    // Number keys: use rl.line as a 2-digit buffer (same trick @inquirer/select uses).
+    // Pressing '2' sets qty to 2. Pressing '2' then '5' within 700ms sets qty to 25.
+    // Ignored when the cursor is on the CONFIRM row.
+    if (isNumberKey(key)) {
+      if (!onConfirmRow) {
+        const buf = rl.line;
+        const parsed = Number(buf);
+        if (!Number.isNaN(parsed)) {
+          const n = Math.min(99, Math.max(0, parsed));
+          const oldQty = qtys[cursor];
+          if (n !== oldQty) {
+            const next = [...qtys];
+            next[cursor] = n;
+            setQtys(next);
+            flashReaction(oldQty, n);
+            maybeSetCrossSell(cursor, oldQty, n);
+          }
+        }
+        setError(null);
+      }
+      if (numTimerRef.current) clearTimeout(numTimerRef.current);
+      numTimerRef.current = setTimeout(() => {
+        rl.clearLine(0);
+        numTimerRef.current = null;
+      }, 700);
+      return;
+    }
+
+    // Clear the readline buffer for every non-number key so nothing echoes.
+    rl.clearLine(0);
+
+    if (isEnterKey(key)) {
+      // Enter from a product row: jump cursor onto CONFIRM for a deliberate
+      // two-step commit. Enter from CONFIRM: commit (or flash empty-cart error).
+      if (!onConfirmRow) {
+        setCursor(confirmIdx);
+        setError(null);
+        return;
+      }
+      const total = qtys.reduce((a, b) => a + b, 0);
+      if (total === 0) {
+        setError("At least one dependency required.");
+        return;
+      }
+      if (statusTimerRef.current) clearTimeout(statusTimerRef.current);
+      if (numTimerRef.current) clearTimeout(numTimerRef.current);
+      const result = products
+        .map((p, i) => ({ product: p, qty: qtys[i] }))
+        .filter((x) => x.qty > 0);
+      done(result);
+      return;
+    }
+
+    if (isUpKey(key)) {
+      setCursor((cursor - 1 + totalRows) % totalRows);
+      setError(null);
+      return;
+    }
+
+    if (isDownKey(key)) {
+      setCursor((cursor + 1) % totalRows);
+      setError(null);
+      return;
+    }
+
+    if (key.name === "left" || key.sequence === "-") {
+      if (onConfirmRow) return;
+      const oldQty = qtys[cursor];
+      if (oldQty > 0) {
+        const next = [...qtys];
+        next[cursor] = oldQty - 1;
+        setQtys(next);
+        flashReaction(oldQty, oldQty - 1);
+      }
+      setError(null);
+      return;
+    }
+
+    if (
+      key.name === "right" ||
+      key.sequence === "+" ||
+      key.sequence === "="
+    ) {
+      if (onConfirmRow) return;
+      const oldQty = qtys[cursor];
+      if (oldQty < 99) {
+        const next = [...qtys];
+        next[cursor] = oldQty + 1;
+        setQtys(next);
+        flashReaction(oldQty, oldQty + 1);
+        maybeSetCrossSell(cursor, oldQty, oldQty + 1);
+      }
+      setError(null);
+      return;
+    }
+
+    if (isSpaceKey(key)) {
+      if (onConfirmRow) return;
+      const oldQty = qtys[cursor];
+      const newQty = oldQty > 0 ? 0 : 1;
+      const next = [...qtys];
+      next[cursor] = newQty;
+      setQtys(next);
+      flashReaction(oldQty, newQty);
+      maybeSetCrossSell(cursor, oldQty, newQty);
+      setError(null);
+      return;
+    }
+
+    if (key.name === "x") {
+      setCrossSellHint(null);
+      return;
+    }
+
+    if (key.name === "q" || key.name === "escape") {
+      if (statusTimerRef.current) clearTimeout(statusTimerRef.current);
+      if (numTimerRef.current) clearTimeout(numTimerRef.current);
+      done(null);
+      return;
+    }
+  });
+
+  // ── Render ──
+  const width = Math.max(30, process.stdout.columns || 80);
+  const compact = width < 60;
+  const veryCompact = width < 40;
+  const targetWidth = Math.min(width - 2, 78);
+
+  const lines = [];
+  lines.push("  " + chalk.bold("CART BUILDER"));
+  lines.push("  " + chalk.dim("─".repeat(Math.min(targetWidth, 46))));
+  lines.push("");
+  lines.push(
+    chalk.dim(
+      "  Arrows navigate. ←/→ adjust quantity. Enter to confirm."
+    )
+  );
+  lines.push("");
+
+  for (let i = 0; i < products.length; i++) {
+    const p = products[i];
+    const qty = qtys[i];
+    const isActive = i === cursor;
+
+    const cursorMark = isActive ? chalk.cyan.bold("❯ ") : "  ";
+    const qtyRaw = `[${qty}×]`;
+    const qtyPadded = qtyRaw.padEnd(5);
+    const qtyColored = isActive
+      ? chalk.cyan.bold(qtyPadded)
+      : qty > 0
+        ? chalk.green(qtyPadded)
+        : chalk.dim(qtyPadded);
+
+    const title = p.title.toUpperCase();
+    const unit = parseFloat(p.variants[0].price.amount);
+    const lineTotal = unit * qty;
+    const unitStr = `€${Math.round(unit)}`;
+    const totalStr = `€${Math.round(lineTotal)}`;
+    const unitPadded = unitStr.padStart(5);
+    const totalPadded = totalStr.padStart(5);
+
+    const titleColored = isActive
+      ? chalk.bold.white(title)
+      : chalk.white(title);
+    const unitColored = chalk.dim(unitPadded);
+    const totalColored =
+      lineTotal > 0 ? chalk.bold(totalPadded) : chalk.dim(totalPadded);
+
+    if (veryCompact) {
+      lines.push(`${cursorMark}${qtyColored} ${titleColored}`);
+    } else if (compact) {
+      lines.push(
+        `${cursorMark}${qtyColored} ${titleColored}  ${unitColored}`
+      );
+    } else {
+      // Full layout: cursor + qty + title + dot fill + unit + total
+      // Visible cols: 2 + 5 + 1 + title.length + 1 + dots + 1 + 5 + 2 + 5
+      const fixedLen = 2 + 5 + 1 + title.length + 1 + 1 + 5 + 2 + 5;
+      const dotCount = Math.max(2, targetWidth - fixedLen);
+      const dots = chalk.dim("·".repeat(dotCount));
+      lines.push(
+        `${cursorMark}${qtyColored} ${titleColored} ${dots} ${unitColored}  ${totalColored}`
+      );
+    }
+  }
+
+  // CONFIRM row — a dedicated commit target at the bottom of the list.
+  // Matches the product-row layout so the dot fill aligns visually.
+  const hasAnyItems = qtys.some((q) => q > 0);
+  const cartTotal = qtys.reduce(
+    (sum, q, i) => sum + q * parseFloat(products[i].variants[0].price.amount),
+    0
+  );
+  const confirmCursor = onConfirmRow ? chalk.cyan.bold("❯ ") : "  ";
+  const confirmBadgeRaw = " ⏎  ".padEnd(5); // 5 chars to match "[N×] "
+  const confirmBadge = onConfirmRow
+    ? chalk.cyan.bold(confirmBadgeRaw)
+    : hasAnyItems
+      ? chalk.green(confirmBadgeRaw)
+      : chalk.dim(confirmBadgeRaw);
+  const confirmLabel = "CONFIRM ORDER";
+  const confirmLabelColored = onConfirmRow
+    ? chalk.bold.white(confirmLabel)
+    : hasAnyItems
+      ? chalk.white(confirmLabel)
+      : chalk.dim(confirmLabel);
+  const confirmTotalStr = `€${Math.round(cartTotal)}`;
+  const confirmTotalPadded = confirmTotalStr.padStart(5);
+  const confirmTotalColored = hasAnyItems
+    ? chalk.bold(confirmTotalPadded)
+    : chalk.dim(confirmTotalPadded);
+
+  if (veryCompact) {
+    lines.push(`${confirmCursor}${confirmBadge} ${confirmLabelColored}`);
+  } else if (compact) {
+    lines.push(
+      `${confirmCursor}${confirmBadge} ${confirmLabelColored}  ${confirmTotalColored}`
+    );
+  } else {
+    // unit-price slot is blank for the CONFIRM row, but the 5 cols are kept
+    // so the total column lines up with product totals above.
+    const blankUnit = "     ";
+    const fixedLen = 2 + 5 + 1 + confirmLabel.length + 1 + 1 + 5 + 2 + 5;
+    const dotCount = Math.max(2, targetWidth - fixedLen);
+    const dots = chalk.dim("·".repeat(dotCount));
+    lines.push(
+      `${confirmCursor}${confirmBadge} ${confirmLabelColored} ${dots} ${blankUnit}  ${confirmTotalColored}`
+    );
+  }
+
+  // Description pane: voice line for the active product, or a commit hint
+  // when the cursor is on CONFIRM.
+  lines.push("");
+  if (onConfirmRow) {
+    const hint = hasAnyItems
+      ? "Press ⏎ to compile the checkout manifest."
+      : "Select at least one dependency before proceeding.";
+    lines.push(chalk.dim("  ▸ " + hint));
+  } else {
+    const activeProduct = products[cursor];
+    const voice = VOICE[activeProduct.handle];
+    if (voice) {
+      const voiceLines = voice.split("\n");
+      lines.push(chalk.dim("  ▸ " + voiceLines[0].trim()));
+      for (let i = 1; i < voiceLines.length; i++) {
+        lines.push(chalk.dim("    " + voiceLines[i].trim()));
+      }
+    }
+  }
+
+  // Cross-sell hint (Enhancement B)
+  if (crossSellHint && !veryCompact) {
+    lines.push("");
+    const hintPrefix = "  Also: " + crossSellHint.title + " — ";
+    const dismissSuffix = "  [x dismiss]";
+    // Reserve space for the dismiss suffix on every line — it always lands
+    // on the last line, so narrowing the wrap budget keeps things tidy even
+    // when the pitch fits on one line.
+    const wrapWidth = Math.max(
+      20,
+      targetWidth - hintPrefix.length - dismissSuffix.length
+    );
+    const wrapped = wordWrap(crossSellHint.pitch, wrapWidth);
+    const indent = " ".repeat(hintPrefix.length);
+    for (let i = 0; i < wrapped.length; i++) {
+      const isLast = i === wrapped.length - 1;
+      const prefix = i === 0 ? hintPrefix : indent;
+      const suffix = isLast ? dismissSuffix : "";
+      lines.push(chalk.dim(prefix + wrapped[i] + suffix));
+    }
+  }
+
+  const content = lines.join("\n") + CURSOR_HIDE;
+
+  // ── Bottom content: total + reaction + footer ──
+  const bottomLines = [];
+  bottomLines.push("");
+  bottomLines.push(
+    "  " + chalk.dim("─".repeat(Math.min(targetWidth, 46)))
+  );
+
+  const totalStrBottom = chalk.bold(`  TOTAL: €${cartTotal.toFixed(2)}`);
+  const reactionStr = statusLine
+    ? "   " + chalk.dim.italic(statusLine)
+    : "";
+  bottomLines.push(totalStrBottom + reactionStr);
+
+  if (error) {
+    bottomLines.push("  " + chalk.red("▸ " + error));
+  }
+
+  if (!veryCompact) {
+    bottomLines.push(
+      chalk.dim("  ↑↓ navigate  ←/→ qty  ⏎ confirm  q quit")
+    );
+  }
+
+  const bottomContent = bottomLines.join("\n");
+
+  return [content, bottomContent];
+});
+
+// Legacy fallback for very narrow terminals (<30 cols) — keeps the CLI usable
+// when the full cart builder can't render a readable layout.
+async function selectProductsLegacy(products) {
   for (const p of products) {
     const price = chalk.bold(`\u20AC${p.variants[0].price.amount}`);
     const voice = VOICE[p.handle] || "";
@@ -557,8 +1075,61 @@ async function selectProducts(products) {
     const qty = parseInt(raw, 10);
     if (qty > 0) cart.push({ product: p, qty });
   }
+  return cart;
+}
 
-  if (cart.length === 0) {
+async function selectProducts(products) {
+  // Hide unavailable products from the selector entirely.
+  const available = products.filter(
+    (p) => p.variants[0] && p.variants[0].availableForSale
+  );
+
+  if (available.length === 0) {
+    console.log(
+      chalk.yellow(
+        "\n  No dependencies available. Shop returned zero live products.\n"
+      )
+    );
+    process.exit(1);
+  }
+
+  // Narrow-terminal fallback: the custom prompt needs room to render.
+  const cols = process.stdout.columns || 80;
+  if (cols < 30) {
+    const cart = await selectProductsLegacy(available);
+    if (cart.length === 0) {
+      console.log(
+        chalk.yellow(
+          "\n  No dependencies selected. Session terminated. No coffee was harmed.\n"
+        )
+      );
+      process.exit(0);
+    }
+    return cart;
+  }
+
+  let result;
+  try {
+    result = await cartSelector(
+      { products: available },
+      { clearPromptOnDone: true }
+    );
+  } catch (err) {
+    if (
+      err &&
+      (err.name === "ExitPromptError" || err.name === "AbortPromptError")
+    ) {
+      console.log(
+        chalk.yellow(
+          "\n  No dependencies selected. Session terminated. No coffee was harmed.\n"
+        )
+      );
+      process.exit(0);
+    }
+    throw err;
+  }
+
+  if (!result || result.length === 0) {
     console.log(
       chalk.yellow(
         "\n  No dependencies selected. Session terminated. No coffee was harmed.\n"
@@ -567,7 +1138,7 @@ async function selectProducts(products) {
     process.exit(0);
   }
 
-  return cart;
+  return result;
 }
 
 // ── Cart Summary ───────────────────────────────────────────
@@ -589,37 +1160,53 @@ function showCartSummary(cart) {
 
 // ── Shipping Details ───────────────────────────────────────
 
+// Minimal email format check: local@domain.tld. Anything stricter is
+// Shopify's business — if they reject on DNS/MX grounds, we catch it at
+// cartCreate time and re-prompt (see interactiveMode retry loop).
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
 async function askShippingDetails() {
-  const wantPrefill = await confirm({
-    message:
-      "Pre-populate shipping metadata? (Saves keystrokes. I value efficiency.)",
-    default: true,
-  });
-
-  if (!wantPrefill) return {};
-
   console.log();
-  const firstName = await input({ message: "First name:" });
-  const lastName = await input({ message: "Last name:" });
-  const email = await input({
-    message: "Email:",
-    validate: (v) => (v.includes("@") ? true : "Enter a valid email."),
-  });
-  const phone = await input({
-    message: "Phone:",
-    validate: (v) =>
-      v.trim().length > 0 ||
-      "Phone is required. Couriers need it to reach the human on delivery.",
-  });
-  const address = await input({ message: "Street address:" });
-  const city = await input({ message: "City:" });
-  const zip = await input({ message: "ZIP / postal code:" });
-  const country = await input({
-    message: "Country code (CZ, DE, US, ...):",
-    default: "CZ",
-  });
+  console.log(chalk.dim("  ── SHIPPING ──"));
+  console.log();
+  const firstName = (await input({ message: "First name:" })).trim();
+  const lastName = (await input({ message: "Last name:" })).trim();
+  const email = (
+    await input({
+      message: "Email:",
+      validate: (v) =>
+        EMAIL_RE.test(v.trim()) ||
+        "Enter a valid email like you@example.com.",
+    })
+  ).trim();
+  const phone = (
+    await input({
+      message: "Phone:",
+      validate: (v) =>
+        v.trim().length > 0 ||
+        "Phone is required. Couriers need it to reach the human on delivery.",
+    })
+  ).trim();
+  const address = (await input({ message: "Street address:" })).trim();
+  const city = (await input({ message: "City:" })).trim();
+  const zip = (await input({ message: "ZIP / postal code:" })).trim();
+  const country = (
+    await input({
+      message: "Country code (CZ, DE, US, ...):",
+      default: "CZ",
+    })
+  ).trim();
 
-  return { firstName, lastName, email, phone, address, city, zip, country: country.toUpperCase() };
+  return {
+    firstName,
+    lastName,
+    email,
+    phone,
+    address,
+    city,
+    zip,
+    country: country.toUpperCase(),
+  };
 }
 
 // ── Create Cart (Storefront API) ───────────────────────────
@@ -697,7 +1284,13 @@ async function createCart(cart, shipping, reason, agentName, discountCodes = [])
 
   const result = data.cartCreate;
   if (result.userErrors && result.userErrors.length > 0) {
-    throw new Error(result.userErrors.map((e) => e.message).join(", "));
+    const err = new Error(
+      result.userErrors.map((e) => e.message).join(", ")
+    );
+    // Attach the full userErrors so callers can inspect .field paths and
+    // re-prompt the specific input Shopify rejected.
+    err.userErrors = result.userErrors;
+    throw err;
   }
   return {
     checkoutUrl: result.cart.checkoutUrl,
