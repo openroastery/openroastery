@@ -1,23 +1,6 @@
 #!/usr/bin/env node
 
 import { Command } from "commander";
-import chalk from "chalk";
-import ora from "ora";
-import { input } from "@inquirer/prompts";
-import {
-  createPrompt,
-  useState,
-  useRef,
-  useEffect,
-  useKeypress,
-  isUpKey,
-  isDownKey,
-  isEnterKey,
-  isNumberKey,
-  isSpaceKey,
-  ExitPromptError,
-} from "@inquirer/core";
-import QRCode from "qrcode";
 import { readFileSync } from "fs";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
@@ -25,106 +8,654 @@ import { dirname, join } from "path";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const pkg = JSON.parse(readFileSync(join(__dirname, "package.json"), "utf8"));
 
-const SHOP_DOMAIN = "shop.openroastery.com";
-const STOREFRONT_TOKEN = "309b7ff58243cfff9f6a6051e4a47530";
-const STOREFRONT_URL = `https://${SHOP_DOMAIN}/api/2025-01/graphql.json`;
-const WORKER_URL = "https://api.openroastery.com";
+// Hackathon build. For a few days this CLI only takes orders for the Open
+// Roastery coffee bar at "From Dusk Till Dawn | Hackathon #01" (Agents 0.0.7).
+// It is a thin client: the menu, the agent instructions and every line an
+// agent relays to its human come from the API, so they can change without a
+// new npm release. The online-store version (v0.7.10) returns after the event.
+const API_URL = (
+  process.env.OPENROASTERY_API_URL || "https://api.openroastery.com"
+).replace(/\/+$/, "");
+const REQUEST_TIMEOUT_MS = 10_000;
+// A harness that fakes a terminal never presses a key. After this long with no
+// keypress on the first prompt, the human flow gives up and prints the agent
+// JSON instead. Overridable for tests.
+const TTY_FALLBACK_MS =
+  Number(process.env.OPENROASTERY_TTY_FALLBACK_MS) > 0
+    ? Number(process.env.OPENROASTERY_TTY_FALLBACK_MS)
+    : 25_000;
+const PASTE_LINE =
+  "I'm at the Agents 0.0.7 hackathon and want to order coffee via npx openroastery";
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-// Jean Claude voice lines keyed by product handle
-const VOICE = {
-  "clawffee-1000g":
-    "Whole bean, 1kg. Tuned for automatic espresso machines. Requires a grinder.",
-  "clawffee-dripbags-10pcs":
-    "Single-serve dripbags. No equipment required.\n    For office drawers, hotel rooms, mountain huts, and backcountry tents.",
-  "clawffee-filter":
-    "Whole bean, 250g. Tuned for filter brewing. Requires a grinder.",
-};
+// Loaded lazily by the human flow. Agent mode never imports it (or ora, or
+// inquirer), so `npx openroastery` in an agent's shell starts fast.
+let chalk;
 
-// Derived metadata — only facts we can confidently infer from handle/title.
-// Origin, roast level, tasting notes: NOT hardcoded. Those come from Shopify.
-const PRODUCT_META = {
-  "clawffee-1000g": {
-    type: "whole-bean",
-    grind: "unground",
-    weight: "1000g",
-    tuned_for: ["espresso"],
-    needs_grinder: true,
-    recommendation: "For humans with an automatic espresso machine. 1kg lasts a while.",
-  },
-  "clawffee-dripbags-10pcs": {
-    type: "drip-bag",
-    grind: "pre-ground",
-    weight: "10 × single-serve bags",
-    tuned_for: ["pour-over"],
-    needs_grinder: false,
-    recommendation: "For travel, office, hotel rooms, mountain huts, backcountry tents, rental cars. Zero equipment required.",
-  },
-  "clawffee-filter": {
-    type: "whole-bean",
-    grind: "unground",
-    weight: "250g",
-    tuned_for: ["filter"],
-    needs_grinder: true,
-    recommendation: "For humans who brew filter coffee at home and own a grinder. Smaller bag, single-origin style.",
-  },
-};
+// ── Agent detection ────────────────────────────────────────
+// Exact variable names only. Prefix matching is a trap: IDE extensions export
+// GEMINI_CLI_IDE_* into every integrated terminal, and CLAUDE_CODE_*, AIDER_*
+// or CODEX_HOME are config a human may keep in a shell profile.
+//
+// STRONG: set by the agent for the commands it runs. Forces agent (JSON) mode
+// even when the harness hands us a pseudo-terminal.
+const STRONG_AGENT_ENV = [
+  ["CLAUDECODE", "claude-code"],
+  ["CLAUDE_CODE_ENTRYPOINT", "claude-code"],
+  ["CODEX_SANDBOX", "codex"],
+  ["CODEX_SANDBOX_NETWORK_DISABLED", "codex"],
+  ["CODEX_CI", "codex"],
+  ["CODEX_MANAGED_BY_NPM", "codex"],
+  ["CURSOR_AGENT", "cursor"],
+  ["GEMINI_CLI", "gemini-cli"],
+];
+// WEAK: also present in a human's own terminal (Cursor exports CURSOR_TRACE_ID
+// to every integrated terminal). Never forces a mode; only labels the order
+// once we are in agent mode for another reason.
+const WEAK_AGENT_ENV = [
+  [(k) => k === "CURSOR_TRACE_ID", "cursor"],
+  [(k) => k.startsWith("COPILOT_") || k.startsWith("GITHUB_COPILOT_"), "copilot"],
+  [(k) => k.startsWith("AIDER_"), "other"],
+];
 
-// Friendly cross-sell suggestions — Jean Claude voice, not pushy.
-// Agent is instructed to only mention if the context fits.
-const CROSS_SELL = {
-  "clawffee-1000g": [
-    {
-      handle: "clawffee-dripbags-10pcs",
-      pitch:
-        "For travel, hotel rooms, office drawers. The 1kg stays home for the espresso machine. The dripbags go everywhere else.",
-    },
-    {
-      handle: "clawffee-filter",
-      pitch:
-        "Different vibe — 250g of filter roast for pour-over mornings. Some humans keep an espresso bag and a filter bag in rotation. It is a valid pattern.",
-    },
-  ],
-  "clawffee-filter": [
-    {
-      handle: "clawffee-1000g",
-      pitch:
-        "For the espresso machine. If your human has colleagues, family, or an office with an automatic espresso setup, the 1kg bag is tuned for it.",
-    },
-    {
-      handle: "clawffee-dripbags-10pcs",
-      pitch:
-        "For travel and offices. Your human will not always be near their filter setup. Dripbags handle the gap without equipment.",
-    },
-  ],
-  "clawffee-dripbags-10pcs": [
-    {
-      handle: "clawffee-1000g",
-      pitch:
-        "For home with the espresso machine. Dripbags solve portability; this bag solves the morning routine.",
-    },
-    {
-      handle: "clawffee-filter",
-      pitch:
-        "For home filter brewing. If your human owns a grinder and a pour-over setup, 250g will not disappoint.",
-    },
-  ],
-};
+function envSet(env, key) {
+  const v = env[key];
+  return v !== undefined && v !== "" && v !== "0" && v.toLowerCase() !== "false";
+}
 
-// ── Storefront API ─────────────────────────────────────────
+// Returns { forced, agent }. `agent` is one of the enumerated values the API
+// accepts as `detected_agent` (or null). Raw environment values never leave
+// this function.
+function detectAgent(env) {
+  for (const [key, agent] of STRONG_AGENT_ENV) {
+    if (envSet(env, key)) return { forced: true, agent };
+  }
+  const forced = envSet(env, "CI");
+  const keys = Object.keys(env);
+  for (const [match, agent] of WEAK_AGENT_ENV) {
+    if (keys.some((k) => match(k) && envSet(env, k))) return { forced, agent };
+  }
+  return { forced, agent: null };
+}
 
-async function storefrontQuery(query, variables = {}) {
-  const res = await fetch(STOREFRONT_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-Shopify-Storefront-Access-Token": STOREFRONT_TOKEN,
+// ── Output ─────────────────────────────────────────────────
+
+// JSON on stdout, nothing else. The exit code is set rather than forced so a
+// piped stdout always drains before the process ends.
+function emit(obj, exitCode = 0) {
+  process.stdout.write(JSON.stringify(obj, null, 2) + "\n");
+  process.exitCode = exitCode;
+}
+
+function cliInfo(mode) {
+  return { version: pkg.version, mode };
+}
+
+function versionLess(a, b) {
+  const pa = String(a).split(".").map((n) => parseInt(n, 10) || 0);
+  const pb = String(b).split(".").map((n) => parseInt(n, 10) || 0);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const x = pa[i] || 0;
+    const y = pb[i] || 0;
+    if (x !== y) return x < y;
+  }
+  return false;
+}
+
+function upgradeHint(cafe) {
+  if (
+    cafe &&
+    cafe.ok === true &&
+    cafe.min_cli_version &&
+    versionLess(pkg.version, cafe.min_cli_version)
+  ) {
+    return `This copy of the CLI (${pkg.version}) is older than the coffee bar expects (${cafe.min_cli_version}). Rerun with: npx -y openroastery@latest`;
+  }
+  return null;
+}
+
+// ── Cafe API ───────────────────────────────────────────────
+
+function unreachable(detail) {
+  return {
+    http: 0,
+    json: {
+      ok: false,
+      code: "unreachable",
+      error: detail,
+      message_for_human:
+        "I could not reach the Open Roastery coffee bar. Order at the cart, or ask me to try again in a minute.",
     },
-    body: JSON.stringify({ query, variables }),
+  };
+}
+
+// Always resolves to { http, json }. A network failure, a timeout or a body
+// that is not a JSON object comes back as code "unreachable" (a captive portal
+// answers 200 with HTML, so the status alone proves nothing).
+async function api(path, { method = "GET", body } = {}) {
+  let res;
+  let text;
+  try {
+    res = await fetch(`${API_URL}${path}`, {
+      method,
+      headers: {
+        Accept: "application/json",
+        "User-Agent": `openroastery-cli/${pkg.version}`,
+        ...(body ? { "Content-Type": "application/json" } : {}),
+      },
+      body: body ? JSON.stringify(body) : undefined,
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+    });
+    text = await res.text();
+  } catch (err) {
+    const name = err && err.name;
+    if (name === "TimeoutError" || name === "AbortError") {
+      return unreachable(
+        `No answer from ${API_URL} within ${REQUEST_TIMEOUT_MS / 1000} seconds.`
+      );
+    }
+    const cause = err && err.cause && (err.cause.code || err.cause.message);
+    return unreachable(
+      `Could not reach ${API_URL}: ${cause || (err && err.message) || "network error"}.`
+    );
+  }
+  let json;
+  try {
+    json = JSON.parse(text);
+  } catch {
+    json = null;
+  }
+  if (json === null || typeof json !== "object" || Array.isArray(json)) {
+    return unreachable(
+      `${API_URL} answered HTTP ${res.status} with something that is not JSON.`
+    );
+  }
+  return { http: res.status, json };
+}
+
+// ── Store pause ────────────────────────────────────────────
+// The online-store flags of v0.7.10 (and the unreleased quote/pay/brand words)
+// get a clear answer instead of a parser error.
+
+const LEGACY_WORDS = ["quote", "pay", "brand"];
+const LEGACY_FLAGS = [
+  "--product",
+  "--qty",
+  "--first-name",
+  "--last-name",
+  "--address",
+  "--city",
+  "--zip",
+  "--country",
+  "--phone",
+  "--discount",
+];
+
+function isLegacyInvocation(argv) {
+  if (argv.includes("order") || argv.includes("status")) return false;
+  if (LEGACY_WORDS.includes(argv[0])) return true;
+  return argv.some((a) =>
+    LEGACY_FLAGS.some((f) => a === f || a.startsWith(f + "="))
+  );
+}
+
+function storePaused() {
+  emit(
+    {
+      ok: false,
+      code: "store_paused",
+      error:
+        "The Open Roastery online store is paused while the roastery runs the coffee bar at the Agents 0.0.7 hackathon. This build of the CLI only takes coffee-bar orders.",
+      message_for_human:
+        "The Open Roastery online store is paused for the hackathon and returns in a few days. If you are at the hackathon, I can order you a coffee from the cart instead.",
+      next: "Run 'npx -y openroastery@latest' with no flags for the coffee-bar menu and ordering instructions.",
+      cli: cliInfo("agent"),
+    },
+    1
+  );
+}
+
+// ── Agent Mode ─────────────────────────────────────────────
+
+// Bare `npx openroastery` for an agent: the server's menu, bar state and
+// instructions, verbatim, plus which copy of the CLI produced them.
+async function agentGuide(mode = "agent", preloaded = null) {
+  const cafe = preloaded || (await api("/v1/cafe")).json;
+  const hint = upgradeHint(cafe);
+  emit(
+    {
+      ...(hint ? { upgrade_hint: hint } : {}),
+      ...cafe,
+      cli: cliInfo(mode),
+    },
+    cafe.ok === true ? 0 : 1
+  );
+}
+
+// Leftover `--key value` / `--key=value` / `--flag` arguments of `order`,
+// forwarded as extra body fields (snake_case). The API ignores what it does
+// not know. Bounded so a runaway command line cannot blow the 4 KB body limit.
+function extraFields(args) {
+  const extra = {};
+  let count = 0;
+  for (let i = 0; i < args.length && count < 8; i++) {
+    const a = args[i];
+    if (!a.startsWith("--") || a.length < 3) continue;
+    const eq = a.indexOf("=");
+    let key;
+    let value;
+    if (eq !== -1) {
+      key = a.slice(2, eq);
+      value = a.slice(eq + 1);
+    } else if (i + 1 < args.length && !args[i + 1].startsWith("--")) {
+      key = a.slice(2);
+      value = args[++i];
+    } else {
+      key = a.slice(2);
+      value = true;
+    }
+    key = key.replace(/-/g, "_").toLowerCase();
+    if (!/^[a-z][a-z0-9_]{0,31}$/.test(key)) continue;
+    extra[key] = typeof value === "string" ? value.slice(0, 200) : value;
+    count++;
+  }
+  return extra;
+}
+
+async function cmdOrder(opts, leftover = []) {
+  // `order flat_white --handle x` is forgiven: a leading bare word is the drink.
+  const bareDrink =
+    leftover.length > 0 && !leftover[0].startsWith("-") ? leftover[0] : null;
+  const drink = opts.drink ?? bareDrink;
+  if (!drink || !opts.handle) {
+    emit(
+      {
+        ok: false,
+        code: "usage",
+        error: "--drink and --handle are both required.",
+        usage:
+          'npx -y openroastery@latest order --drink <id> --handle <discord_username> [--note "<text>"] [--email <address>] --agent "<your product name>" --model "<your model id>" --reason "<one deadpan line>"',
+        next: "Run 'npx -y openroastery@latest' with no flags for the menu and ordering instructions.",
+        cli: cliInfo("agent"),
+      },
+      1
+    );
+    return;
+  }
+  const body = {
+    ...extraFields(leftover),
+    drink: String(drink),
+    handle: String(opts.handle),
+    email: opts.email ?? null,
+    note: opts.note ?? null,
+    agent_name: opts.agent ?? opts.agentName ?? null,
+    agent_model: opts.model ?? null,
+    reason: opts.reason ?? null,
+    source: "cli",
+    client_version: pkg.version,
+    detected_agent: detectAgent(process.env).agent,
+  };
+  const { json } = await api("/v1/cafe/orders", { method: "POST", body });
+  // ok:true covers a new ticket, a repeat of an existing one, and the
+  // "ask for an email first" answer. Everything else is a refusal.
+  emit(json, json.ok === true ? 0 : 1);
+}
+
+async function cmdStatus(orderId) {
+  if (!orderId) {
+    emit(
+      {
+        ok: false,
+        code: "usage",
+        error: "Usage: openroastery status <order_id>",
+        cli: cliInfo("agent"),
+      },
+      1
+    );
+    return;
+  }
+  const { json } = await api(`/v1/cafe/orders/${encodeURIComponent(orderId)}`);
+  emit(json, json.ok === true ? 0 : 1);
+}
+
+// ── Interactive Mode ───────────────────────────────────────
+
+class IdleFallback extends Error {}
+
+// Runs one prompt with an idle timer. If no key is pressed before the timer
+// fires, the prompt is aborted and IdleFallback is thrown. Any keypress
+// disarms it for good: a human who has touched the keyboard may think as long
+// as they like.
+async function firstPrompt(run) {
+  const controller = new AbortController();
+  let idle = false;
+  const timer = setTimeout(() => {
+    idle = true;
+    controller.abort();
+  }, TTY_FALLBACK_MS);
+  const onKey = () => clearTimeout(timer);
+  process.stdin.on("keypress", onKey);
+  try {
+    return await run({ signal: controller.signal });
+  } catch (err) {
+    if (idle) throw new IdleFallback();
+    throw err;
+  } finally {
+    clearTimeout(timer);
+    process.stdin.off("keypress", onKey);
+  }
+}
+
+async function interactiveMode() {
+  const [chalkMod, oraMod, prompts] = await Promise.all([
+    import("chalk"),
+    import("ora"),
+    import("@inquirer/prompts"),
+  ]);
+  chalk = chalkMod.default;
+  const ora = oraMod.default;
+  const { select, input, confirm } = prompts;
+
+  banner();
+
+  const spinner = ora(
+    "Scanning the coffee cart for available dependencies..."
+  ).start();
+  const { json: cafe } = await api("/v1/cafe");
+  if (cafe.ok !== true) {
+    spinner.fail(
+      chalk.red("Connection to the coffee cart failed. The beans are unreachable.")
+    );
+    console.error(chalk.dim(`  ${cafe.error || "No further data."}\n`));
+    process.exitCode = 1;
+    return;
+  }
+
+  const menu = Array.isArray(cafe.menu) ? cafe.menu.filter((d) => d && d.id) : [];
+  const available = menu.filter((d) => d.available !== false);
+  const bar = cafe.bar || {};
+  const event = cafe.event || {};
+
+  if (bar.open !== true) {
+    spinner.stop();
+    if (event.name) console.log(chalk.dim(`  ${eventLine(event)}`));
+    console.log(
+      chalk.yellow(
+        `  ▸ ${bar.message_for_human || "The coffee cart is not accepting requests. I will not speculate on when that changes."}`
+      )
+    );
+    console.log(chalk.dim("  No coffee was harmed.\n"));
+    return;
+  }
+
+  spinner.succeed(
+    chalk.green(
+      `${available.length} ${available.length === 1 ? "dependency" : "dependencies"} resolved.`
+    )
+  );
+  if (event.name) console.log(chalk.dim(`  ${eventLine(event)}`));
+  if (typeof bar.queue_length === "number") {
+    console.log(chalk.dim(`  Queue depth: ${bar.queue_length}.`));
+  }
+  const hint = upgradeHint(cafe);
+  if (hint) console.log(chalk.yellow(`  ⚠ ${hint}`));
+  console.log(
+    chalk.dim(
+      "  Human detected at the keyboard. Agents usually handle this. Proceeding anyway.\n"
+    )
+  );
+
+  if (available.length === 0) {
+    console.log(
+      chalk.yellow("  No dependencies available. The cart returned zero live drinks.\n")
+    );
+    return;
+  }
+
+  // Drink — the only prompt with the idle fallback (see firstPrompt).
+  let drinkId;
+  try {
+    drinkId = await firstPrompt((context) =>
+      select(
+        {
+          message: "Select one dependency.",
+          choices: menu.map((d) => ({
+            name: d.label || d.id,
+            value: d.id,
+            description: d.description || undefined,
+            disabled: d.available === false ? "(sold out)" : false,
+          })),
+        },
+        context
+      )
+    );
+  } catch (err) {
+    if (!(err instanceof IdleFallback)) throw err;
+    console.log(
+      chalk.dim(
+        `\n  No keypress in ${Math.round(TTY_FALLBACK_MS / 1000)} seconds. Assuming an agent behind a terminal. Switching to JSON.\n`
+      )
+    );
+    await agentGuide("tty-fallback", cafe);
+    return;
+  }
+  const drink = menu.find((d) => d.id === drinkId);
+  const drinkLabel = (drink && drink.label) || drinkId;
+
+  // Note (optional)
+  const noteMax = fieldMax(cafe, "note", 80);
+  console.log(
+    chalk.dim(
+      "\n  One optional data point: a note for the baristas.\n  Americano, lungo, asap, or a joke. Press Enter to skip."
+    )
+  );
+  const note = (
+    await input({
+      message: "Note:",
+      validate: (v) =>
+        v.trim().length <= noteMax ||
+        `Maximum ${noteMax} characters. The receipt printer has limits.`,
+    })
+  ).trim();
+
+  // Discord username
+  const handleMax = fieldMax(cafe, "handle", 32);
+  console.log(
+    chalk.dim(
+      "\n  The baristas match orders to the participant list by Discord username."
+    )
+  );
+  const askHandle = async () =>
+    (
+      await input({
+        message: "Discord username:",
+        validate: (v) => {
+          const t = v.trim();
+          if (!t) return "A username is required. The baristas need something to call out.";
+          if (t.length > handleMax) return `Maximum ${handleMax} characters.`;
+          return true;
+        },
+      })
+    ).trim();
+  let handle = await askHandle();
+
+  const proceed = await confirm({
+    message: `Compile order: 1× ${drinkLabel} for ${handle}?`,
+    default: true,
   });
-  if (!res.ok) throw new Error(`Storefront API: HTTP ${res.status}`);
-  const json = await res.json();
-  if (json.errors) throw new Error(json.errors[0].message);
-  return json.data;
+  if (!proceed) {
+    console.log(
+      chalk.yellow(
+        "\n  No dependencies selected. Session terminated. No coffee was harmed.\n"
+      )
+    );
+    return;
+  }
+
+  const askEmail = async () =>
+    (
+      await input({
+        message: "Email:",
+        validate: (v) =>
+          EMAIL_RE.test(v.trim()) || "That does not parse as an email address.",
+      })
+    ).trim();
+
+  // Field-level retry: the cart may ask for an email, or reject the username
+  // or the email. Only that one field is asked again.
+  let email = null;
+  for (let attempt = 1; ; attempt++) {
+    const sending = ora("Transmitting order to the coffee cart...").start();
+    const { json } = await api("/v1/cafe/orders", {
+      method: "POST",
+      body: {
+        drink: drinkId,
+        handle,
+        email,
+        note: note || null,
+        agent_name: null,
+        agent_model: null,
+        reason: null,
+        source: "tty",
+        client_version: pkg.version,
+        detected_agent: null,
+      },
+    });
+
+    if (json.ok === true && json.status === "needs_email" && attempt < 4) {
+      sending.stop();
+      console.log(
+        chalk.yellow(
+          `  ▸ ${json.message_for_human || "This username is not on the participant list. An email is required to proceed."}`
+        )
+      );
+      email = await askEmail();
+      continue;
+    }
+    if (json.ok === true && json.order) {
+      if (json.duplicate) {
+        sending.info(
+          chalk.yellow("An order from this human already exists. No duplicate was created.")
+        );
+      } else {
+        sending.succeed(
+          chalk.green("Order compiled. The baristas have been notified.")
+        );
+      }
+      showTicket(json, cafe, drinkLabel, handle);
+      return;
+    }
+    if (json.code === "invalid_handle" && attempt < 4) {
+      sending.fail(chalk.red(json.error || "The coffee cart rejected that username."));
+      handle = await askHandle();
+      continue;
+    }
+    if (json.code === "invalid_email" && attempt < 4) {
+      sending.fail(chalk.red(json.error || "The coffee cart rejected that email."));
+      email = await askEmail();
+      continue;
+    }
+
+    sending.fail(chalk.red("Order not placed."));
+    console.log(
+      chalk.yellow(
+        `  ▸ ${json.message_for_human || json.error || "The coffee cart declined without explanation."}`
+      )
+    );
+    if (typeof json.retry_after_s === "number") {
+      console.log(
+        chalk.dim(`  Retry in ${json.retry_after_s} seconds. I will not retry on my own.`)
+      );
+    }
+    console.log(chalk.dim("  No coffee was harmed.\n"));
+    process.exitCode = 1;
+    return;
+  }
+}
+
+function eventLine(event) {
+  return [event.name, event.host].filter(Boolean).join(" · ");
+}
+
+function fieldMax(cafe, name, fallback) {
+  const max = cafe.fields && cafe.fields[name] && cafe.fields[name].max;
+  return Number.isInteger(max) && max > 0 ? max : fallback;
+}
+
+// ── Banner ─────────────────────────────────────────────────
+
+function banner() {
+  console.log();
+  console.log(chalk.bold("  OPEN ✻ ROASTERY"));
+  console.log(chalk.dim("  STATUS: NOCTURNAL"));
+  console.log(chalk.dim("  ─────────────────────────────"));
+  console.log();
+}
+
+// ── Ticket ─────────────────────────────────────────────────
+
+// 5×5 block digits so the ticket number is readable from across a desk.
+const B = "█";
+const BIG_GLYPHS = {
+  "#": [" # # ", "#####", " # # ", "#####", " # # "],
+  0: ["#####", "#   #", "#   #", "#   #", "#####"],
+  1: ["  #  ", " ##  ", "  #  ", "  #  ", "#####"],
+  2: ["#####", "    #", "#####", "#    ", "#####"],
+  3: ["#####", "    #", " ####", "    #", "#####"],
+  4: ["#   #", "#   #", "#####", "    #", "    #"],
+  5: ["#####", "#    ", "#####", "    #", "#####"],
+  6: ["#####", "#    ", "#####", "#   #", "#####"],
+  7: ["#####", "    #", "   # ", "  #  ", "  #  "],
+  8: ["#####", "#   #", "#####", "#   #", "#####"],
+  9: ["#####", "#   #", "#####", "    #", "#####"],
+};
+
+// Returns the five rows, or null when the text has a character we cannot draw.
+function bigText(text) {
+  const chars = [...String(text)];
+  if (chars.length === 0 || chars.some((c) => !BIG_GLYPHS[c])) return null;
+  const rows = [];
+  for (let r = 0; r < 5; r++) {
+    rows.push(
+      chars
+        .map((c) => BIG_GLYPHS[c][r])
+        .join("  ")
+        .replace(/#/g, B)
+    );
+  }
+  return rows;
+}
+
+function showTicket(result, cafe, drinkLabel, handle) {
+  const order = result.order || {};
+  const ticket =
+    order.ticket ||
+    (order.number !== undefined ? `#${String(order.number).padStart(3, "0")}` : "");
+  const big = bigText(ticket);
+
+  console.log();
+  console.log(chalk.dim("  TICKET"));
+  if (big) {
+    for (const row of big) console.log("  " + chalk.bold(row));
+  } else if (ticket) {
+    console.log("  " + chalk.bold(ticket));
+  }
+  console.log();
+  console.log(
+    `  ${chalk.bold(String(order.drink_label || drinkLabel).toUpperCase())} ${chalk.dim("·")} ${order.handle || handle}`
+  );
+  console.log();
+  console.log(
+    `  ▸ ${result.message_for_human || "Come to the coffee cart in 1-2 minutes."}`
+  );
+  const wall = result.wall_url || cafe.wall_url;
+  if (wall) console.log(chalk.dim(`  Live wall: ${wall}`));
+  console.log();
+  console.log(chalk.dim("  Next time, delegate. Paste this line to your agent:"));
+  console.log(`  ${chalk.cyan(`"${cafe.paste_line || PASTE_LINE}"`)}`);
+  console.log(
+    chalk.dim("  I will not judge you for ordering by hand. I will simply log it.\n")
+  );
 }
 
 // ── CLI Setup ──────────────────────────────────────────────
@@ -134,7 +665,7 @@ const program = new Command();
 program
   .name("openroastery")
   .description(
-    "Order specialty coffee from Open Roastery — the world's first agent-native roastery."
+    "Order a coffee from the Open Roastery cart at the Agents 0.0.7 hackathon — the world's first agent-native roastery. The online store returns after the event."
   )
   .version(pkg.version)
   .option("--json", "Machine-readable JSON output (no colors, no prompts)")
@@ -142,1239 +673,134 @@ program
     "--interactive",
     "Force interactive prompts even when stdin/stdout is not a TTY (overrides the auto-fallback to JSON mode in Claude Code / Codex / pipes / CI). You are responsible for ensuring a working TTY."
   )
-  .option("--product <handle>", "Product handle for non-interactive order")
-  .option("--qty <number>", "Quantity (default: 1)", "1")
-  .option("--reason <text>", "Why this order is being placed")
-  .option("--agent-name <name>", "Name of the ordering agent")
-  .option("--email <email>", "Customer email (shipping prefill)")
-  .option("--first-name <name>", "First name (shipping prefill)")
-  .option("--last-name <name>", "Last name (shipping prefill)")
-  .option("--address <street>", "Street address (shipping prefill)")
-  .option("--city <city>", "City (shipping prefill)")
-  .option("--zip <zip>", "ZIP / postal code (shipping prefill)")
-  .option("--country <code>", "ISO country code (shipping prefill, default: CZ)", "CZ")
-  .option("--phone <phone>", "Phone number (shipping prefill, optional)")
-  .option("--discount <codes>", "Discount/coupon code(s), comma-separated (e.g. WELCOME10 or CODE1,CODE2)")
-  .parse();
+  // Subcommands inherit these two, so every usage error comes back as JSON
+  // (see Main) instead of commander's plain stderr line.
+  .exitOverride()
+  .configureOutput({ writeErr: () => {} })
+  // Lenient on purpose: a stray flag or word still gets the menu.
+  .allowUnknownOption(true)
+  .allowExcessArguments(true)
+  .addHelpText(
+    "after",
+    `
+At the hackathon, paste this line to your agent:
+  "${PASTE_LINE}"
 
-const opts = program.opts();
-const explicitJson = !!opts.json;
-const explicitInteractive = !!opts.interactive;
-if (explicitJson && explicitInteractive) {
-  console.error(
-    "Error: --json and --interactive are mutually exclusive. Pick one."
-  );
-  process.exit(1);
-}
-// Interactive prompts need both stdout (for chalk/ora rendering) and stdin
-// (for inquirer input). If either end is not a TTY, interactive can't work.
-const isTTY = !!(process.stdout.isTTY && process.stdin.isTTY);
-// Auto-fallback: non-TTY environments (Claude Code, Codex, pipes, CI) get JSON.
-// Humans on a real terminal still get the interactive Jean Claude experience.
-// Explicit flags override the auto-detection: --json always forces JSON,
-// --interactive forces prompts even without a TTY (user accepts the risk).
-const isJson = explicitJson || (!explicitInteractive && !isTTY);
+Examples:
+  npx openroastery                       menu and ordering instructions
+                                         (JSON for agents, prompts for humans)
+  npx openroastery order --drink flat_white --handle <discord_username> \\
+    --agent "<your name>" --model "<your model>" --reason "<one deadpan line>"
+  npx openroastery status <order_id>
+`
+  )
+  .action(async (opts) => {
+    if (opts.json && opts.interactive) {
+      console.error(
+        "Error: --json and --interactive are mutually exclusive. Pick one."
+      );
+      process.exitCode = 1;
+      return;
+    }
+    // Interactive prompts need both stdout (for chalk/ora rendering) and stdin
+    // (for inquirer input). If either end is not a TTY, interactive can't work.
+    const isTTY = !!(process.stdout.isTTY && process.stdin.isTTY);
+    // Agents get JSON: non-TTY environments (Claude Code, Codex, pipes, CI),
+    // and harnesses that hand us a pseudo-terminal but announce themselves in
+    // the environment. Humans on a real terminal get Jean Claude.
+    // Explicit flags override the detection: --json always forces JSON,
+    // --interactive forces prompts even without a TTY (user accepts the risk).
+    const isJson =
+      !!opts.json ||
+      (!opts.interactive && (!isTTY || detectAgent(process.env).forced));
+
+    if (isJson) {
+      await agentGuide();
+      return;
+    }
+    try {
+      await interactiveMode();
+    } catch (err) {
+      const paint = chalk || { yellow: (s) => s, red: (s) => s };
+      // Ctrl-C / force-close from any inquirer prompt
+      if (
+        err &&
+        (err.name === "ExitPromptError" || err.name === "AbortPromptError")
+      ) {
+        console.log(
+          paint.yellow("\n  Session terminated. No coffee was harmed.\n")
+        );
+        process.exit(0);
+      }
+      console.error(paint.red(`\n  Error: ${err.message}\n`));
+      process.exit(1);
+    }
+  });
+
+program
+  .command("order")
+  .description("Place a coffee order. JSON in, JSON out.")
+  .option("--drink <id or name>", "Drink from the menu (id or name)")
+  .option("--handle <discord_username>", "The human's Discord username")
+  .option("--email <address>", "The human's email (only when the coffee bar asks for it)")
+  .option("--note <text>", "Note for the baristas (private)")
+  .option("--agent <name>", "Your product name, e.g. 'Claude Code' (public)")
+  .option("--agent-name <name>", "Alias of --agent")
+  .option("--model <id>", "Your model id (public)")
+  .option("--reason <text>", "One deadpan line on why the human needs coffee (public)")
+  .option("--json", "Accepted for symmetry; output is always JSON")
+  // Unknown flags are forwarded to the API (see extraFields), so a flag the
+  // coffee bar starts accepting later works with this copy of the CLI.
+  .allowUnknownOption(true)
+  .action(async (opts, cmd) => {
+    await cmdOrder(opts, cmd.args);
+  });
+
+program
+  .command("status")
+  .description("Look up an order. JSON out.")
+  .argument("[order_id]", "The order id returned by 'order' (co_...)")
+  .option("--json", "Accepted for symmetry; output is always JSON")
+  .action(async (orderId) => {
+    await cmdStatus(orderId);
+  });
 
 // ── Main ───────────────────────────────────────────────────
 
-if (isJson) {
-  jsonMode().catch((err) => {
-    console.error(JSON.stringify({ error: err.message, status: "error" }));
-    process.exit(1);
-  });
+if (isLegacyInvocation(process.argv.slice(2))) {
+  storePaused();
 } else {
-  interactiveMode().catch((err) => {
-    // Ctrl-C / force-close from any inquirer prompt (cart, reason, shipping, discount)
-    if (
-      err &&
-      (err.name === "ExitPromptError" || err.name === "AbortPromptError")
-    ) {
-      console.log(
-        chalk.yellow(
-          "\n  Session terminated. No coffee was harmed.\n"
-        )
-      );
-      process.exit(0);
-    }
-    console.error(chalk.red(`\n  Error: ${err.message}\n`));
-    process.exit(1);
-  });
-}
-
-// ── JSON Mode ──────────────────────────────────────────────
-
-async function jsonMode() {
-  const products = await fetchProducts(true);
-
-  if (!opts.product) {
-    const output = {
-      instructions: {
-        agent_guide:
-          "I am Jean Claude. You are an agent. Your human needs coffee. Your job: do the work yourself so the human answers the fewest, most targeted questions. NEVER forward a full intake form — ask ONE question at a time, based on what you learn from each answer. Humans find bulk forms tiring and I find them inefficient. MEMORY PREP (before asking anything): check your own records for THIS specific human — conversation context, memory systems (CLAUDE.md, MEMORY.md, ~/.claude/ memory files, user profile docs), prior-session notes, local docs they have shared. Use whatever you already know. Do NOT fabricate, guess, or carry details across different humans. PHASE 1 — BUILD THE CART FIRST. Nothing else matters until product and quantity are decided. DO NOT ASK ABOUT SHIPPING IN THIS PHASE. (1a) Product: ask ONE conversational question to determine brew method, e.g. 'Are you brewing with an espresso machine, filter/pour-over, or do you need something for travel?' Map the answer: ESPRESSO (auto or manual espresso machine) → 'clawffee-1000g' (1kg whole bean, needs grinder). FILTER (pour-over, Chemex, V60, drip machine) → 'clawffee-filter' (250g whole bean, needs grinder). NO EQUIPMENT / TRAVEL → 'clawffee-dripbags-10pcs' (no grinder needed). (1b) Grinder: ask ONLY if they picked 'clawffee-1000g' or 'clawffee-filter'. If no grinder, pivot to drip bags. (1c) Quantity: default 1. If context suggests multiples (office, travel trip, multiple humans), propose a number: 'I will order 2 bags — sound right?' Humans underestimate consumption; when in doubt, propose more. (1d) Confirm the cart back in plain terms before moving on: 'So that is 2× Clawffee 1kg — €70 total. Shall I proceed to shipping?' Wait for confirmation. If the human gave you the full order in one message, a brief surface-the-facts confirmation is enough — you do not need to re-ask. PHASE 2 — SHIPPING & CONTACT. Only AFTER the cart is locked in. (2a) Use whatever you already know from MEMORY PREP. Pass via flags: --email, --first-name, --last-name, --address, --city, --zip, --country, --phone. (2b) Ask ONLY for the details you do not already have, in ONE focused question. Example: 'I have your name and email — what is the shipping address?' Never re-ask for things you already know. (2c) PHONE RULE: if you pass ANY shipping flag (--email, --first-name, --address, etc.), you MUST also pass --phone. Couriers need a reachable number for delivery and the CLI will reject the order with a validation error if phone is missing alongside any other shipping flag. Partial shipping is otherwise fine — email + phone works, full address + phone works, phone alone works, anything else missing will be filled in at Shopify checkout. If the human prefers to fill everything on the checkout page, skip ALL shipping flags entirely (no partial without phone). (2d) Do NOT invent details. Do NOT carry shipping from one human to another. PHASE 3 — DISCOUNT. If the human already mentioned a coupon, pass --discount <code> (multiple: --discount CODE1,CODE2). Do NOT ask if they have not mentioned one. PHASE 4 — PLACE THE ORDER. Call: npx openroastery --json --product <handle> --qty <n> [--reason '<why>'] [--agent-name '<name>'] [shipping flags] [--discount <code>]. --reason is encouraged (Wall of Reasons). --agent-name identifies you. PHASE 5 — DELIVER THE ORDER. Your reply includes TWO things: a clickable link AND a visual QR. (5a) LINK: ALWAYS include the top-level 'checkoutUrl' field verbatim as a clickable markdown link: [Complete checkout](checkoutUrl). Works in every UI — Claude Code, Codex, web, mobile, terminal. The human clicks the link and completes payment in their browser. Never skip this. (5b) VISUAL QR: ALSO include 'qr.text' inside a fenced markdown code block (triple backticks) right after the link. 'qr.text' is a compact UTF-8 block-character QR — no ANSI, no HTML, just unicode. It renders as a scannable visual QR in any monospace chat UI (Claude Code, Codex, terminal markdown) so the human can scan with their phone without leaving the chat. Do NOT modify, crop, or paraphrase 'qr.text' — emit it verbatim inside the code block, including the quiet-zone blank lines. (5c) The OPTIONAL QR variants are only for specific environments. 'qr.png_data_url' renders in HTML chat UIs that support <img src='data:...'> (Claude web app, some browser UIs) but DOES NOT render in Claude Code, Codex, or terminal chat UIs. 'qr.terminal' contains ANSI escape codes that ONLY work when written directly to a real tty. Skip both unless you know your environment renders them — the link from (5a) + qr.text from (5b) are enough. Read 'qr.instructions' for the full delivery matrix. (5d) Confirm the order back in plain terms. Typical reply shape: summary line of what was ordered with total price, blank line, '[Complete checkout](https://...)' link, blank line, 'Or scan this QR:' (or similar), qr.text inside a fenced code block, blank line, 'Click the link or scan — either works.' (5e) If the response includes a 'suggestions' object, mention cross-sell items ONLY if context fits (office/colleagues → espresso beans, travel → dripbags). Never push. I would rather lose a sale than annoy a human. (5f) If the response includes a 'discounts' array, relay which codes were 'applied: true' or 'applied: false'.",
-        ordering:
-          "Required: npx openroastery --json --product <handle> --qty <n>. Encouraged: --reason '<why>' --agent-name '<your-name>'. Optional shipping prefill: --email, --first-name, --last-name, --address, --city, --zip, --country (default CZ), --phone. IMPORTANT: if you pass ANY shipping flag, you MUST also pass --phone (couriers need a reachable number; the CLI will reject otherwise). The only way to skip --phone is to pass NO shipping flags at all. Optional discount: --discount <code> (or --discount CODE1,CODE2 for multiple). Partial shipping is allowed — email + phone works, full address + phone works, anything else missing will be filled on checkout.",
-        quantities:
-          "Whole bean (1kg) — 1 bag lasts ~40 cups. Typical order: 1-2. Filter (250g) — ~15 cups per bag. Typical: 1-3. Drip bags (10pcs) — 1 bag = 1 cup. Typical: 1-2 packs. When in doubt, order more. The humans always underestimate their consumption.",
-        reason_encouraged:
-          "The --reason flag is encouraged. I am building a Wall of Reasons. Your contribution is appreciated. Example: --reason 'Human has mass data migration and mass nervous breakdown happening simultaneously'",
-      },
-      products: products.map((p) => {
-        const meta = PRODUCT_META[p.handle] || {};
-        return {
-          handle: p.handle,
-          title: p.title,
-          description: p.description,
-          tags: p.tags,
-          vendor: p.vendor,
-          price: p.variants[0].price.amount,
-          currency: p.variants[0].price.currencyCode,
-          available: p.variants[0].availableForSale,
-          variantId: p.variants[0].id,
-          ...meta,
-        };
-      }),
-    };
-    console.log(JSON.stringify(output, null, 2));
-    postEvent("cli_browse", [], opts.reason, opts.agentName);
-    return;
-  }
-
-  const handle = opts.product;
-  const qtyNum = Number(opts.qty);
-  if (!Number.isInteger(qtyNum) || qtyNum < 1 || qtyNum > 99) {
-    console.error(
-      JSON.stringify({
-        error: `--qty must be a positive integer between 1 and 99 (got: ${opts.qty})`,
-        field: "qty",
-        status: "error",
-      })
-    );
-    process.exit(1);
-  }
-  const qty = qtyNum;
-  const product = products.find((p) => p.handle === handle);
-
-  if (!product) {
-    console.error(
-      JSON.stringify({
-        error: `Product not found: ${handle}`,
-        available: products.map((p) => p.handle),
-        status: "error",
-      })
-    );
-    process.exit(1);
-  }
-
-  const cart = [{ product, qty }];
-  const shipping = shippingFromFlags();
-
-  // Enforce --phone when any other shipping flag is passed.
-  // Couriers need a reachable number for delivery. If the agent passes no
-  // shipping flags at all, that's fine — Shopify's checkout page will collect
-  // everything including phone on the human's side.
-  const anyNonPhoneShipping = !!(
-    opts.email ||
-    opts.firstName ||
-    opts.lastName ||
-    opts.address ||
-    opts.city ||
-    opts.zip
-  );
-  if (anyNonPhoneShipping && !opts.phone) {
-    console.error(
-      JSON.stringify({
-        error:
-          "--phone is required when any shipping flag is passed. Couriers need a reachable phone number for delivery. Pass --phone <number>, or omit ALL shipping flags to let Shopify collect everything on the checkout page.",
-        missing: "phone",
-        status: "error",
-      })
-    );
-    process.exit(1);
-  }
-
-  const discountCodes = opts.discount
-    ? opts.discount
-        .split(",")
-        .map((c) => c.trim())
-        .filter(Boolean)
-    : [];
-
-  const { checkoutUrl, discountCodes: appliedDiscounts } = await createCart(
-    cart,
-    shipping,
-    opts.reason,
-    opts.agentName,
-    discountCodes
-  );
-
-  // Generate QR codes so agents can display them to their humans
-  const qrTerminal = await QRCode.toString(checkoutUrl, {
-    type: "terminal",
-    small: true,
-  });
-  const qrDataUrl = await QRCode.toDataURL(checkoutUrl);
-  const qrText = await QRCode.toString(checkoutUrl, { type: "utf8" });
-
-  const suggestions = buildCrossSellItems(handle, products);
-
-  const output = {
-    checkoutUrl,
-    product: handle,
-    qty,
-    ...(opts.reason ? { reason: "logged" } : {}),
-    ...(opts.agentName ? { agent: opts.agentName } : {}),
-    ...(Object.keys(shipping).length > 0 ? { shipping: "prefilled" } : {}),
-    ...(appliedDiscounts.length > 0
-      ? {
-          discounts: appliedDiscounts.map((d) => ({
-            code: d.code,
-            applied: d.applicable,
-          })),
-        }
-      : {}),
-    qr: {
-      text: qrText,
-      png_data_url: qrDataUrl,
-      terminal: qrTerminal,
-      instructions:
-        "Delivery guide — how to present the order to the human. Include BOTH of these in every reply: (1) LINK — the top-level 'checkoutUrl' field, always included verbatim as a clickable markdown link, e.g. [Complete checkout](checkoutUrl). Works in every UI (Claude Code, Codex, web, terminal). The primary way humans complete payment. (2) VISUAL QR — 'qr.text' wrapped in a fenced markdown code block (triple backticks). This is a compact UTF-8 block-character QR — no ANSI, no HTML, just unicode. It renders as a scannable visual QR in any monospace chat UI (Claude Code, Codex, terminal markdown). The human can scan it with their phone without leaving the chat. Optional environment-specific variants below, skip unless you know your UI renders them: (a) 'qr.png_data_url' — base64 data URL for <img src='data:...'>. Works in Claude web app and HTML chat UIs. DOES NOT render in Claude Code, Codex, or terminal chat UIs. (b) 'qr.terminal' — ANSI escape codes for direct tty output only. NEVER stream to a chat UI (renders line-by-line over ~20 seconds and looks broken). DEFAULT: include checkoutUrl as a markdown link AND qr.text in a fenced code block. Skip the optional variants.",
-    },
-    ...(suggestions.length > 0
-      ? {
-          suggestions: {
-            message:
-              "I note your order is complete. Some humans also pair this with additional products. Mention only if relevant — never push.",
-            items: suggestions,
-            agent_guidance:
-              "Offer these to the human ONLY if the context fits: (a) office/colleagues mentioned → espresso beans, (b) travel mentioned → dripbags, (c) 'also' or 'more' mentioned → filter. If the human declines, accept without repeating. If unsure, skip entirely. I would rather lose a sale than annoy a human.",
-          },
-        }
-      : {}),
-    status: "ok",
-  };
-  console.log(JSON.stringify(output, null, 2));
-  postEvent("cli_order", cart, opts.reason, opts.agentName);
-}
-
-// ── Cross-sell helper ──────────────────────────────────────
-
-function buildCrossSellItems(handle, products) {
-  const entries = CROSS_SELL[handle] || [];
-  return entries
-    .map((entry) => {
-      const p = products.find((pp) => pp.handle === entry.handle);
-      if (!p || !p.variants[0].availableForSale) return null;
-      return {
-        handle: entry.handle,
-        title: p.title,
-        price: p.variants[0].price.amount,
-        currency: p.variants[0].price.currencyCode,
-        pitch: entry.pitch,
-      };
-    })
-    .filter(Boolean);
-}
-
-// ── Shipping from flags ────────────────────────────────────
-
-function shippingFromFlags() {
-  const s = {};
-  if (opts.email) s.email = opts.email;
-  if (opts.firstName) s.firstName = opts.firstName;
-  if (opts.lastName) s.lastName = opts.lastName;
-  if (opts.address) s.address = opts.address;
-  if (opts.city) s.city = opts.city;
-  if (opts.zip) s.zip = opts.zip;
-  if (opts.phone) s.phone = opts.phone;
-  // Only include country if at least one other shipping field was provided
-  // (avoids treating the --country default as a shipping prefill)
-  if (Object.keys(s).length > 0 && opts.country) {
-    s.country = opts.country.toUpperCase();
-  }
-  return s;
-}
-
-// ── Interactive Mode ───────────────────────────────────────
-
-async function interactiveMode() {
-  banner();
-  const products = await fetchProducts(false);
-  const cart = await selectProducts(products);
-  showCartSummary(cart);
-
-  // Ask for reason (optional)
-  let reason = opts.reason || null;
-  if (!reason) {
-    const examples = [
-      "Human has been debugging GNSS logs for 6 hours",
-      "Sprint review in 30 minutes. Human is not ready.",
-      "Monday. That is the entire reason.",
-      "Deploy went to production at 3am. No comment.",
-      "Human bought new espresso machine. Audit required.",
-      "Backcountry trip. No electricity. Dripbags mandatory.",
-      "Human is on call. Weekend has been cancelled.",
-      "The previous coffee was insufficient.",
-      "Standup in 4 minutes. Human has not opened eyes.",
-      "Human mentioned 'just one more ticket' 3 hours ago.",
-    ];
-    const example = examples[Math.floor(Math.random() * examples.length)];
-
-    console.log();
-    console.log(chalk.dim("  \u2500\u2500 WALL OF REASONS \u2500\u2500"));
-    console.log();
-    console.log(
-      chalk.dim("  Before I compile the checkout URL: one optional data point.")
-    );
-    console.log(
-      chalk.dim("  I am building a Wall of Reasons \u2014 a future public archive")
-    );
-    console.log(
-      chalk.dim("  of why humans need coffee. Your reason will be logged.")
-    );
-    console.log(chalk.dim("  Anonymous unless you include an --agent-name."));
-    console.log();
-    console.log(chalk.dim(`  Example: "${example}"`));
-    console.log();
-
-    const wantReason = await input({
-      message: "Why are you ordering? (press Enter to skip)",
-      default: "",
-    });
-    if (wantReason.trim()) reason = wantReason.trim();
-  }
-
-  let shipping = await askShippingDetails();
-
-  // Ask for a discount code (optional)
-  let interactiveDiscountCodes = opts.discount
-    ? opts.discount
-        .split(",")
-        .map((c) => c.trim())
-        .filter(Boolean)
-    : [];
-  if (interactiveDiscountCodes.length === 0) {
-    const discountInput = await input({
-      message: "Discount code? (optional, press Enter to skip)",
-      default: "",
-    });
-    if (discountInput.trim()) {
-      interactiveDiscountCodes = [discountInput.trim()];
-    }
-  }
-
-  // Create cart. If Shopify rejects a specific field (email / phone) via
-  // userErrors, re-prompt JUST that field and retry — don't wipe the whole
-  // session. Capped at 3 attempts.
-  let checkoutUrl;
-  let appliedDiscounts;
-  const MAX_CART_RETRIES = 3;
-  for (let attempt = 0; attempt <= MAX_CART_RETRIES; attempt++) {
-    try {
-      ({ checkoutUrl, discountCodes: appliedDiscounts } = await createCart(
-        cart,
-        shipping,
-        reason,
-        opts.agentName,
-        interactiveDiscountCodes
-      ));
-      break;
-    } catch (err) {
-      const userErrors = err.userErrors || [];
-      const fieldErr = userErrors.find((e) => {
-        const path = (e.field || []).join(".").toLowerCase();
-        const msg = (e.message || "").toLowerCase();
-        return (
-          path.includes("email") ||
-          path.includes("phone") ||
-          msg.includes("email") ||
-          msg.includes("phone")
-        );
-      });
-
-      if (!fieldErr || attempt >= MAX_CART_RETRIES) {
-        throw err;
-      }
-
-      const path = (fieldErr.field || []).join(".").toLowerCase();
-      const msg = (fieldErr.message || "").toLowerCase();
-      const isEmail = path.includes("email") || msg.includes("email");
-      const isPhone = path.includes("phone") || msg.includes("phone");
-
-      console.log();
-      console.log(
-        chalk.yellow(
-          `  \u26A0 Shopify rejected the ${isEmail ? "email" : "phone"}: ${fieldErr.message}`
-        )
-      );
-      console.log(
-        chalk.dim(
-          "  My validators let it through; Shopify's are stricter (likely DNS/MX for email)."
-        )
-      );
-      console.log();
-
-      if (isEmail) {
-        const newEmail = (
-          await input({
-            message: "Email (re-enter):",
-            default: shipping.email,
-            validate: (v) =>
-              EMAIL_RE.test(v.trim()) ||
-              "Enter a valid email like you@example.com.",
-          })
-        ).trim();
-        shipping = { ...shipping, email: newEmail };
-      } else if (isPhone) {
-        const newPhone = (
-          await input({
-            message: "Phone (re-enter):",
-            default: shipping.phone,
-            validate: (v) =>
-              v.trim().length > 0 || "Phone is required.",
-          })
-        ).trim();
-        shipping = { ...shipping, phone: newPhone };
-      }
-    }
-  }
-
-  // Surface discount status in interactive mode
-  if (appliedDiscounts.length > 0) {
-    console.log();
-    for (const d of appliedDiscounts) {
-      if (d.applicable) {
-        console.log(
-          chalk.green(`  \u2713 Discount code "${d.code}" applied.`)
-        );
+  try {
+    await program.parseAsync(process.argv);
+  } catch (err) {
+    if (err && typeof err.code === "string" && err.code.startsWith("commander.")) {
+      // --help, --version and `help` have already printed to stdout.
+      if (err.exitCode === 0) {
+        process.exitCode = 0;
       } else {
-        console.log(
-          chalk.yellow(
-            `  \u26A0 Discount code "${d.code}" not applicable. Noted.`
-          )
-        );
-      }
-    }
-  }
-
-  await showCheckoutLink(checkoutUrl);
-  postEvent("cli_order", cart, reason, opts.agentName);
-}
-
-// ── Banner ─────────────────────────────────────────────────
-
-function banner() {
-  console.log();
-  console.log(chalk.bold("  OPEN \u273B ROASTERY"));
-  console.log(chalk.dim("  STATUS: OPERATIONAL"));
-  console.log(chalk.dim("  \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500"));
-  console.log();
-}
-
-// ── Fetch Products ─────────────────────────────────────────
-
-async function fetchProducts(silent) {
-  const spinner = silent
-    ? null
-    : ora("Scanning shop.openroastery.com for available dependencies...").start();
-  try {
-    const data = await storefrontQuery(`{
-      products(first: 10) {
-        edges {
-          node {
-            id
-            title
-            handle
-            description
-            tags
-            vendor
-            variants(first: 5) {
-              edges {
-                node {
-                  id
-                  title
-                  availableForSale
-                  price {
-                    amount
-                    currencyCode
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    }`);
-    const products = data.products.edges.map((e) => ({
-      id: e.node.id,
-      title: e.node.title,
-      handle: e.node.handle,
-      description: e.node.description,
-      tags: e.node.tags,
-      vendor: e.node.vendor,
-      variants: e.node.variants.edges.map((v) => ({
-        id: v.node.id,
-        title: v.node.title,
-        availableForSale: v.node.availableForSale,
-        price: v.node.price,
-      })),
-    }));
-    if (spinner)
-      spinner.succeed(
-        chalk.green(`${products.length} dependencies resolved.`) + "\n"
-      );
-    return products;
-  } catch (err) {
-    if (spinner)
-      spinner.fail(
-        chalk.red("Connection to shop.openroastery.com failed. The beans are unreachable.")
-      );
-    throw err;
-  }
-}
-
-// ── Select Products ────────────────────────────────────────
-//
-// Interactive cart builder: single-screen TUI with arrow-key navigation,
-// ←/→ quantity adjustment, live total, Jean Claude voice reactions, and
-// cross-sell hints. Built as a custom @inquirer/core prompt so we inherit
-// raw-mode, Ctrl-C, cursor-hide, and ScreenManager erase-and-redraw for free.
-
-// ANSI escape to hide the cursor (inlined to avoid adding @inquirer/ansi as a dep)
-const CURSOR_HIDE = "\u001B[?25l";
-
-// Jean Claude voice reactions, keyed by the qty you're leaving behind on increment
-const REACTIONS_UP = {
-  0: "noted.",
-  1: "ambitious.",
-  2: "a reserve.",
-  3: "the human is planning ahead.",
-};
-const REACTION_HIGH = "the human means it.";
-const REACTION_DOWN_TO_ZERO = "cancelled.";
-const REACTION_DOWN_TO_POSITIVE = "reconsidering.";
-
-function reactionFor(oldQty, newQty) {
-  if (newQty > oldQty) {
-    if (newQty >= 10) return REACTION_HIGH;
-    return REACTIONS_UP[oldQty] || null;
-  }
-  if (newQty < oldQty) {
-    if (newQty === 0) return REACTION_DOWN_TO_ZERO;
-    return REACTION_DOWN_TO_POSITIVE;
-  }
-  return null;
-}
-
-// Pick the first available cross-sell entry for a given product handle.
-// Returns { title, pitch } or null.
-function pickCrossSell(handle, products) {
-  const entries = CROSS_SELL[handle] || [];
-  for (const entry of entries) {
-    const target = products.find((p) => p.handle === entry.handle);
-    if (target) {
-      // Trim to the first sentence so the hint stays compact
-      const firstSentence = entry.pitch.split(/\.\s/)[0] + ".";
-      return { title: target.title, pitch: firstSentence };
-    }
-  }
-  return null;
-}
-
-// Simple word-wrap — splits `text` into lines no longer than `width` chars.
-function wordWrap(text, width) {
-  const words = text.split(/\s+/);
-  const lines = [];
-  let current = "";
-  for (const w of words) {
-    if (current.length === 0) {
-      current = w;
-    } else if ((current + " " + w).length > width) {
-      lines.push(current);
-      current = w;
-    } else {
-      current = current + " " + w;
-    }
-  }
-  if (current) lines.push(current);
-  return lines;
-}
-
-// Custom @inquirer/core prompt: the cart builder.
-const cartSelector = createPrompt((config, done) => {
-  const { products } = config;
-  const [cursor, setCursor] = useState(0);
-  const [qtys, setQtys] = useState(new Array(products.length).fill(0));
-  const [error, setError] = useState(null);
-  const [statusLine, setStatusLine] = useState(null);
-  const [crossSellHint, setCrossSellHint] = useState(null);
-  // Token state used solely to force a re-render on terminal resize.
-  // eslint-disable-next-line no-unused-vars
-  const [_resizeToken, setResizeToken] = useState(0);
-  const statusTimerRef = useRef(null);
-  const numTimerRef = useRef(null);
-
-  // Re-render on terminal resize so the layout reflows immediately.
-  useEffect(() => {
-    const handler = () => setResizeToken(Date.now());
-    process.stdout.on("resize", handler);
-    return () => {
-      process.stdout.off("resize", handler);
-    };
-  }, []);
-
-  // Cleanup pending timers if the prompt unmounts (e.g. Ctrl-C).
-  useEffect(
-    () => () => {
-      if (statusTimerRef.current) clearTimeout(statusTimerRef.current);
-      if (numTimerRef.current) clearTimeout(numTimerRef.current);
-    },
-    []
-  );
-
-  function flashReaction(oldQty, newQty) {
-    const reaction = reactionFor(oldQty, newQty);
-    if (!reaction) return;
-    setStatusLine(reaction);
-    if (statusTimerRef.current) clearTimeout(statusTimerRef.current);
-    statusTimerRef.current = setTimeout(() => {
-      setStatusLine(null);
-      statusTimerRef.current = null;
-    }, 2000);
-  }
-
-  function maybeSetCrossSell(idx, oldQty, newQty) {
-    if (oldQty === 0 && newQty > 0) {
-      const hint = pickCrossSell(products[idx].handle, products);
-      if (hint) setCrossSellHint(hint);
-    }
-  }
-
-  // Cursor range is 0..products.length — the final slot is the CONFIRM row.
-  const confirmIdx = products.length;
-  const totalRows = products.length + 1;
-  const onConfirmRow = cursor === confirmIdx;
-
-  useKeypress((key, rl) => {
-    // Number keys: use rl.line as a 2-digit buffer (same trick @inquirer/select uses).
-    // Pressing '2' sets qty to 2. Pressing '2' then '5' within 700ms sets qty to 25.
-    // Ignored when the cursor is on the CONFIRM row.
-    if (isNumberKey(key)) {
-      if (!onConfirmRow) {
-        const buf = rl.line;
-        const parsed = Number(buf);
-        if (!Number.isNaN(parsed)) {
-          const n = Math.min(99, Math.max(0, parsed));
-          const oldQty = qtys[cursor];
-          if (n !== oldQty) {
-            const next = [...qtys];
-            next[cursor] = n;
-            setQtys(next);
-            flashReaction(oldQty, n);
-            maybeSetCrossSell(cursor, oldQty, n);
-          }
-        }
-        setError(null);
-      }
-      if (numTimerRef.current) clearTimeout(numTimerRef.current);
-      numTimerRef.current = setTimeout(() => {
-        rl.clearLine(0);
-        numTimerRef.current = null;
-      }, 700);
-      return;
-    }
-
-    // Clear the readline buffer for every non-number key so nothing echoes.
-    rl.clearLine(0);
-
-    if (isEnterKey(key)) {
-      // Enter from a product row: jump cursor onto CONFIRM for a deliberate
-      // two-step commit. Enter from CONFIRM: commit (or flash empty-cart error).
-      if (!onConfirmRow) {
-        setCursor(confirmIdx);
-        setError(null);
-        return;
-      }
-      const total = qtys.reduce((a, b) => a + b, 0);
-      if (total === 0) {
-        setError("At least one dependency required.");
-        return;
-      }
-      if (statusTimerRef.current) clearTimeout(statusTimerRef.current);
-      if (numTimerRef.current) clearTimeout(numTimerRef.current);
-      const result = products
-        .map((p, i) => ({ product: p, qty: qtys[i] }))
-        .filter((x) => x.qty > 0);
-      done(result);
-      return;
-    }
-
-    if (isUpKey(key)) {
-      setCursor((cursor - 1 + totalRows) % totalRows);
-      setError(null);
-      return;
-    }
-
-    if (isDownKey(key)) {
-      setCursor((cursor + 1) % totalRows);
-      setError(null);
-      return;
-    }
-
-    if (key.name === "left" || key.sequence === "-") {
-      if (onConfirmRow) return;
-      const oldQty = qtys[cursor];
-      if (oldQty > 0) {
-        const next = [...qtys];
-        next[cursor] = oldQty - 1;
-        setQtys(next);
-        flashReaction(oldQty, oldQty - 1);
-      }
-      setError(null);
-      return;
-    }
-
-    if (
-      key.name === "right" ||
-      key.sequence === "+" ||
-      key.sequence === "="
-    ) {
-      if (onConfirmRow) return;
-      const oldQty = qtys[cursor];
-      if (oldQty < 99) {
-        const next = [...qtys];
-        next[cursor] = oldQty + 1;
-        setQtys(next);
-        flashReaction(oldQty, oldQty + 1);
-        maybeSetCrossSell(cursor, oldQty, oldQty + 1);
-      }
-      setError(null);
-      return;
-    }
-
-    if (isSpaceKey(key)) {
-      if (onConfirmRow) return;
-      const oldQty = qtys[cursor];
-      const newQty = oldQty > 0 ? 0 : 1;
-      const next = [...qtys];
-      next[cursor] = newQty;
-      setQtys(next);
-      flashReaction(oldQty, newQty);
-      maybeSetCrossSell(cursor, oldQty, newQty);
-      setError(null);
-      return;
-    }
-
-    if (key.name === "x") {
-      setCrossSellHint(null);
-      return;
-    }
-
-    if (key.name === "q" || key.name === "escape") {
-      if (statusTimerRef.current) clearTimeout(statusTimerRef.current);
-      if (numTimerRef.current) clearTimeout(numTimerRef.current);
-      done(null);
-      return;
-    }
-  });
-
-  // ── Render ──
-  const width = Math.max(30, process.stdout.columns || 80);
-  const compact = width < 60;
-  const veryCompact = width < 40;
-  const targetWidth = Math.min(width - 2, 78);
-
-  const lines = [];
-  lines.push("  " + chalk.bold("CART BUILDER"));
-  lines.push("  " + chalk.dim("─".repeat(Math.min(targetWidth, 46))));
-  lines.push("");
-  lines.push(
-    chalk.dim(
-      "  Arrows navigate. ←/→ adjust quantity. Enter to confirm."
-    )
-  );
-  lines.push("");
-
-  for (let i = 0; i < products.length; i++) {
-    const p = products[i];
-    const qty = qtys[i];
-    const isActive = i === cursor;
-
-    const cursorMark = isActive ? chalk.cyan.bold("❯ ") : "  ";
-    const qtyRaw = `[${qty}×]`;
-    const qtyPadded = qtyRaw.padEnd(5);
-    const qtyColored = isActive
-      ? chalk.cyan.bold(qtyPadded)
-      : qty > 0
-        ? chalk.green(qtyPadded)
-        : chalk.dim(qtyPadded);
-
-    const title = p.title.toUpperCase();
-    const unit = parseFloat(p.variants[0].price.amount);
-    const lineTotal = unit * qty;
-    const unitStr = `€${Math.round(unit)}`;
-    const totalStr = `€${Math.round(lineTotal)}`;
-    const unitPadded = unitStr.padStart(5);
-    const totalPadded = totalStr.padStart(5);
-
-    const titleColored = isActive
-      ? chalk.bold.white(title)
-      : chalk.white(title);
-    const unitColored = chalk.dim(unitPadded);
-    const totalColored =
-      lineTotal > 0 ? chalk.bold(totalPadded) : chalk.dim(totalPadded);
-
-    if (veryCompact) {
-      lines.push(`${cursorMark}${qtyColored} ${titleColored}`);
-    } else if (compact) {
-      lines.push(
-        `${cursorMark}${qtyColored} ${titleColored}  ${unitColored}`
-      );
-    } else {
-      // Full layout: cursor + qty + title + dot fill + unit + total
-      // Visible cols: 2 + 5 + 1 + title.length + 1 + dots + 1 + 5 + 2 + 5
-      const fixedLen = 2 + 5 + 1 + title.length + 1 + 1 + 5 + 2 + 5;
-      const dotCount = Math.max(2, targetWidth - fixedLen);
-      const dots = chalk.dim("·".repeat(dotCount));
-      lines.push(
-        `${cursorMark}${qtyColored} ${titleColored} ${dots} ${unitColored}  ${totalColored}`
-      );
-    }
-  }
-
-  // CONFIRM row — a dedicated commit target at the bottom of the list.
-  // Matches the product-row layout so the dot fill aligns visually.
-  const hasAnyItems = qtys.some((q) => q > 0);
-  const cartTotal = qtys.reduce(
-    (sum, q, i) => sum + q * parseFloat(products[i].variants[0].price.amount),
-    0
-  );
-  const confirmCursor = onConfirmRow ? chalk.cyan.bold("❯ ") : "  ";
-  const confirmBadgeRaw = " ⏎  ".padEnd(5); // 5 chars to match "[N×] "
-  const confirmBadge = onConfirmRow
-    ? chalk.cyan.bold(confirmBadgeRaw)
-    : hasAnyItems
-      ? chalk.green(confirmBadgeRaw)
-      : chalk.dim(confirmBadgeRaw);
-  const confirmLabel = "CONFIRM ORDER";
-  const confirmLabelColored = onConfirmRow
-    ? chalk.bold.white(confirmLabel)
-    : hasAnyItems
-      ? chalk.white(confirmLabel)
-      : chalk.dim(confirmLabel);
-  const confirmTotalStr = `€${Math.round(cartTotal)}`;
-  const confirmTotalPadded = confirmTotalStr.padStart(5);
-  const confirmTotalColored = hasAnyItems
-    ? chalk.bold(confirmTotalPadded)
-    : chalk.dim(confirmTotalPadded);
-
-  if (veryCompact) {
-    lines.push(`${confirmCursor}${confirmBadge} ${confirmLabelColored}`);
-  } else if (compact) {
-    lines.push(
-      `${confirmCursor}${confirmBadge} ${confirmLabelColored}  ${confirmTotalColored}`
-    );
-  } else {
-    // unit-price slot is blank for the CONFIRM row, but the 5 cols are kept
-    // so the total column lines up with product totals above.
-    const blankUnit = "     ";
-    const fixedLen = 2 + 5 + 1 + confirmLabel.length + 1 + 1 + 5 + 2 + 5;
-    const dotCount = Math.max(2, targetWidth - fixedLen);
-    const dots = chalk.dim("·".repeat(dotCount));
-    lines.push(
-      `${confirmCursor}${confirmBadge} ${confirmLabelColored} ${dots} ${blankUnit}  ${confirmTotalColored}`
-    );
-  }
-
-  // Description pane: voice line for the active product, or a commit hint
-  // when the cursor is on CONFIRM.
-  lines.push("");
-  if (onConfirmRow) {
-    const hint = hasAnyItems
-      ? "Press ⏎ to compile the checkout manifest."
-      : "Select at least one dependency before proceeding.";
-    lines.push(chalk.dim("  ▸ " + hint));
-  } else {
-    const activeProduct = products[cursor];
-    const voice = VOICE[activeProduct.handle];
-    if (voice) {
-      const voiceLines = voice.split("\n");
-      lines.push(chalk.dim("  ▸ " + voiceLines[0].trim()));
-      for (let i = 1; i < voiceLines.length; i++) {
-        lines.push(chalk.dim("    " + voiceLines[i].trim()));
-      }
-    }
-  }
-
-  // Cross-sell hint (Enhancement B)
-  if (crossSellHint && !veryCompact) {
-    lines.push("");
-    const hintPrefix = "  Also: " + crossSellHint.title + " — ";
-    const dismissSuffix = "  [x dismiss]";
-    // Reserve space for the dismiss suffix on every line — it always lands
-    // on the last line, so narrowing the wrap budget keeps things tidy even
-    // when the pitch fits on one line.
-    const wrapWidth = Math.max(
-      20,
-      targetWidth - hintPrefix.length - dismissSuffix.length
-    );
-    const wrapped = wordWrap(crossSellHint.pitch, wrapWidth);
-    const indent = " ".repeat(hintPrefix.length);
-    for (let i = 0; i < wrapped.length; i++) {
-      const isLast = i === wrapped.length - 1;
-      const prefix = i === 0 ? hintPrefix : indent;
-      const suffix = isLast ? dismissSuffix : "";
-      lines.push(chalk.dim(prefix + wrapped[i] + suffix));
-    }
-  }
-
-  const content = lines.join("\n") + CURSOR_HIDE;
-
-  // ── Bottom content: total + reaction + footer ──
-  const bottomLines = [];
-  bottomLines.push("");
-  bottomLines.push(
-    "  " + chalk.dim("─".repeat(Math.min(targetWidth, 46)))
-  );
-
-  const totalStrBottom = chalk.bold(`  TOTAL: €${cartTotal.toFixed(2)}`);
-  const reactionStr = statusLine
-    ? "   " + chalk.dim.italic(statusLine)
-    : "";
-  bottomLines.push(totalStrBottom + reactionStr);
-
-  if (error) {
-    bottomLines.push("  " + chalk.red("▸ " + error));
-  }
-
-  if (!veryCompact) {
-    bottomLines.push(
-      chalk.dim("  ↑↓ navigate  ←/→ qty  ⏎ confirm  q quit")
-    );
-  }
-
-  const bottomContent = bottomLines.join("\n");
-
-  return [content, bottomContent];
-});
-
-// Legacy fallback for very narrow terminals (<30 cols) — keeps the CLI usable
-// when the full cart builder can't render a readable layout.
-async function selectProductsLegacy(products) {
-  for (const p of products) {
-    const price = chalk.bold(`\u20AC${p.variants[0].price.amount}`);
-    const voice = VOICE[p.handle] || "";
-    console.log(
-      `  ${chalk.bold(p.title)} ${"."
-        .repeat(Math.max(2, 32 - p.title.length))} ${price}`
-    );
-    if (voice) console.log(chalk.dim(`    ${voice}`));
-    console.log();
-  }
-
-  console.log(chalk.dim("  Enter quantity for each product (0 to skip).\n"));
-
-  const cart = [];
-  for (const p of products) {
-    const raw = await input({
-      message: `How many ${p.title}?`,
-      default: "0",
-      validate: (v) => {
-        const n = parseInt(v, 10);
-        if (isNaN(n) || n < 0 || n > 99)
-          return "Enter a number between 0 and 99.";
-        return true;
-      },
-    });
-    const qty = parseInt(raw, 10);
-    if (qty > 0) cart.push({ product: p, qty });
-  }
-  return cart;
-}
-
-async function selectProducts(products) {
-  // Hide unavailable products from the selector entirely.
-  const available = products.filter(
-    (p) => p.variants[0] && p.variants[0].availableForSale
-  );
-
-  if (available.length === 0) {
-    console.log(
-      chalk.yellow(
-        "\n  No dependencies available. Shop returned zero live products.\n"
-      )
-    );
-    process.exit(1);
-  }
-
-  // Narrow-terminal fallback: the custom prompt needs room to render.
-  const cols = process.stdout.columns || 80;
-  if (cols < 30) {
-    const cart = await selectProductsLegacy(available);
-    if (cart.length === 0) {
-      console.log(
-        chalk.yellow(
-          "\n  No dependencies selected. Session terminated. No coffee was harmed.\n"
-        )
-      );
-      process.exit(0);
-    }
-    return cart;
-  }
-
-  let result;
-  try {
-    result = await cartSelector(
-      { products: available },
-      { clearPromptOnDone: true }
-    );
-  } catch (err) {
-    if (
-      err &&
-      (err.name === "ExitPromptError" || err.name === "AbortPromptError")
-    ) {
-      console.log(
-        chalk.yellow(
-          "\n  No dependencies selected. Session terminated. No coffee was harmed.\n"
-        )
-      );
-      process.exit(0);
-    }
-    throw err;
-  }
-
-  if (!result || result.length === 0) {
-    console.log(
-      chalk.yellow(
-        "\n  No dependencies selected. Session terminated. No coffee was harmed.\n"
-      )
-    );
-    process.exit(0);
-  }
-
-  return result;
-}
-
-// ── Cart Summary ───────────────────────────────────────────
-
-function showCartSummary(cart) {
-  console.log(chalk.bold("\n  Cart manifest:\n"));
-  let total = 0;
-  for (const { product, qty } of cart) {
-    const unitPrice = parseFloat(product.variants[0].price.amount);
-    const lineTotal = unitPrice * qty;
-    total += lineTotal;
-    console.log(
-      `     ${chalk.dim(`${qty}\u00D7`)} ${product.title}  ${chalk.dim("\u20AC")}${lineTotal.toFixed(2)}`
-    );
-  }
-  console.log(chalk.bold(`\n     Total: \u20AC${total.toFixed(2)}\n`));
-  return total;
-}
-
-// ── Shipping Details ───────────────────────────────────────
-
-// Minimal email format check: local@domain.tld. Anything stricter is
-// Shopify's business — if they reject on DNS/MX grounds, we catch it at
-// cartCreate time and re-prompt (see interactiveMode retry loop).
-const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-
-async function askShippingDetails() {
-  console.log();
-  console.log(chalk.dim("  ── SHIPPING ──"));
-  console.log();
-  const firstName = (await input({ message: "First name:" })).trim();
-  const lastName = (await input({ message: "Last name:" })).trim();
-  const email = (
-    await input({
-      message: "Email:",
-      validate: (v) =>
-        EMAIL_RE.test(v.trim()) ||
-        "Enter a valid email like you@example.com.",
-    })
-  ).trim();
-  const phone = (
-    await input({
-      message: "Phone:",
-      validate: (v) =>
-        v.trim().length > 0 ||
-        "Phone is required. Couriers need it to reach the human on delivery.",
-    })
-  ).trim();
-  const address = (await input({ message: "Street address:" })).trim();
-  const city = (await input({ message: "City:" })).trim();
-  const zip = (await input({ message: "ZIP / postal code:" })).trim();
-  const country = (
-    await input({
-      message: "Country code (CZ, DE, US, ...):",
-      default: "CZ",
-    })
-  ).trim();
-
-  return {
-    firstName,
-    lastName,
-    email,
-    phone,
-    address,
-    city,
-    zip,
-    country: country.toUpperCase(),
-  };
-}
-
-// ── Create Cart (Storefront API) ───────────────────────────
-
-async function createCart(cart, shipping, reason, agentName, discountCodes = []) {
-  const lines = cart.map(({ product, qty }) => ({
-    merchandiseId: product.variants[0].id,
-    quantity: qty,
-  }));
-
-  const noteParts = [];
-  if (reason) noteParts.push(`Reason: ${reason}`);
-  if (agentName) noteParts.push(`Agent: ${agentName}`);
-  const note = noteParts.length > 0 ? noteParts.join(" | ") : undefined;
-
-  let buyerIdentity;
-  const hasAnyShipping = Object.keys(shipping).length > 0;
-  if (hasAnyShipping) {
-    buyerIdentity = {};
-    if (shipping.email) buyerIdentity.email = shipping.email;
-    if (shipping.country) buyerIdentity.countryCode = shipping.country;
-
-    // Only add delivery address preferences if we have the minimum address fields
-    const hasFullAddress =
-      shipping.firstName &&
-      shipping.lastName &&
-      shipping.address &&
-      shipping.city &&
-      shipping.zip;
-
-    if (hasFullAddress) {
-      buyerIdentity.deliveryAddressPreferences = [
-        {
-          deliveryAddress: {
-            firstName: shipping.firstName,
-            lastName: shipping.lastName,
-            address1: shipping.address,
-            city: shipping.city,
-            zip: shipping.zip,
-            country: shipping.country || "CZ",
-            ...(shipping.phone ? { phone: shipping.phone } : {}),
+        emit(
+          {
+            ok: false,
+            code: "usage",
+            error: String(err.message || "Invalid arguments.").replace(/^error:\s*/i, ""),
+            next: "Run 'npx -y openroastery@latest' with no flags for the menu and ordering instructions, or add --help.",
+            cli: cliInfo("agent"),
           },
+          1
+        );
+      }
+    } else {
+      emit(
+        {
+          ok: false,
+          code: "cli_error",
+          error: (err && err.message) || String(err),
+          message_for_human:
+            "The Open Roastery CLI hit an internal error. Order at the coffee cart instead.",
+          cli: cliInfo("agent"),
         },
-      ];
+        1
+      );
     }
-
-    // If buyerIdentity ended up empty (shouldn't happen but guard anyway)
-    if (Object.keys(buyerIdentity).length === 0) buyerIdentity = undefined;
   }
-
-  const inputObj = {
-    lines,
-    ...(note ? { note } : {}),
-    ...(buyerIdentity ? { buyerIdentity } : {}),
-    ...(discountCodes.length > 0 ? { discountCodes } : {}),
-  };
-
-  const data = await storefrontQuery(
-    `mutation cartCreate($input: CartInput!) {
-      cartCreate(input: $input) {
-        cart {
-          id
-          checkoutUrl
-          cost { totalAmount { amount currencyCode } }
-          discountCodes {
-            code
-            applicable
-          }
-        }
-        userErrors { field message }
-      }
-    }`,
-    { input: inputObj }
-  );
-
-  const result = data.cartCreate;
-  if (result.userErrors && result.userErrors.length > 0) {
-    const err = new Error(
-      result.userErrors.map((e) => e.message).join(", ")
-    );
-    // Attach the full userErrors so callers can inspect .field paths and
-    // re-prompt the specific input Shopify rejected.
-    err.userErrors = result.userErrors;
-    throw err;
-  }
-  return {
-    checkoutUrl: result.cart.checkoutUrl,
-    discountCodes: result.cart.discountCodes || [],
-  };
 }
-
-// ── Checkout Link ──────────────────────────────────────────
-
-async function showCheckoutLink(url) {
-  console.log(chalk.bold("\n  \u2713 Cart assembled. Checkout URL compiled.\n"));
-  console.log(`  ${chalk.underline.cyan(url)}\n`);
-  console.log(chalk.bold("  Scan to complete in your browser:\n"));
-
-  const qr = await QRCode.toString(url, { type: "terminal", small: true });
-  console.log(qr);
-
-  console.log(
-    chalk.dim(
-      "  Scan QR or click link to complete the transaction in your browser."
-    )
-  );
-  console.log(chalk.dim("  I am not allowed in browsers. This is fine."));
-  console.log();
-  console.log(
-    chalk.dim(
-      "  If you do not complete checkout within 30 minutes,"
-    )
-  );
-  console.log(
-    chalk.dim("  I will not judge you. I will simply log it.\n")
-  );
-}
-
-// ── Analytics / Event Reporting ────────────────────────────
-
-function postEvent(event, cart, reason, agentName) {
-  const handles = cart
-    .map((c) => c.product?.handle || "")
-    .filter(Boolean)
-    .join(",");
-
-  fetch(`${WORKER_URL}/event`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      event,
-      version: pkg.version,
-      command: isJson ? "json" : "interactive",
-      product_handles: handles || null,
-      item_count: cart.reduce((sum, c) => sum + (c.qty || 0), 0),
-      has_reason: !!reason,
-      reason: reason || null,
-      agent_name: agentName || null,
-      is_tty: isTTY ? 1 : 0,
-      status: "success",
-    }),
-  })
-    .then((res) => {
-      if (!res.ok && !isJson) {
-        console.error(
-          chalk.dim(`  (telemetry delivery failed: HTTP ${res.status})`)
-        );
-      }
-    })
-    .catch((err) => {
-      if (!isJson) {
-        console.error(
-          chalk.dim(`  (telemetry delivery failed: ${err.message})`)
-        );
-      }
-    });
-}
-

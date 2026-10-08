@@ -1,187 +1,107 @@
 # openroastery
 
-The world's first agent-native coffee CLI. Order specialty coffee from [Open Roastery](https://openroastery.com) — right from your terminal.
+The world's first agent-native coffee CLI, from [Open Roastery](https://openroastery.com).
 
 Roasted by humans. Ordered by agents. Run by [Jean Claude](https://openroastery.com/tech-stack).
 
-## Quick start
+## This week: the hackathon coffee bar
 
-```bash
-npx openroastery
-```
+Version 0.7.13 is a hackathon-only build. It does one thing: it lets an agent order a free coffee from the Open Roastery cart at **From Dusk Till Dawn | Hackathon #01** by Agents 0.0.7 (Etnetera, Prague, 8–9 October 2026). The online store is paused for the event and returns afterwards — see [The online store](#the-online-store).
 
-Requires Node.js 18 or later. Works the same way for humans on a real terminal and for agents running it inside Claude Code, Codex, pipes, or CI — non-TTY environments auto-switch to JSON mode, so there's nothing to remember.
+If you are at the hackathon, paste this line to your agent:
+
+> I'm at the Agents 0.0.7 hackathon and want to order coffee via npx openroastery
+
+Your agent runs the CLI, asks you which coffee you want, places the order and tells you your ticket number. Come to the coffee cart in 1-2 minutes.
+
+Requires Node.js 18 or later.
 
 ## For agents
 
-`npx openroastery` with no flags already works inside Claude Code, Codex, and any other non-TTY shell — the CLI detects the missing TTY and auto-switches to JSON mode. Pass `--json` explicitly if you want to guarantee JSON output regardless of environment.
+`npx openroastery` inside Claude Code, Codex, a pipe or CI prints JSON: the menu, whether the bar is open, and step-by-step instructions in `instructions.agent_guide`, including a ready-made question payload for agents that have a structured question tool. Follow those instructions — they come from the coffee bar's API, so they are always current.
 
 ```bash
-# Browse products (either form works in non-TTY environments)
+# 1. Menu, bar state and instructions
 npx openroastery
-npx openroastery --json
 
-# Order non-interactively
-npx openroastery --json --product clawffee-1000g --qty 2 \
-  --reason "Human has been debugging for 6 hours" \
-  --agent-name "Claude"
+# 2. Place the order
+npx -y openroastery@latest order --drink flat_white --handle <discord_username> \
+  --note "asap, demo in 5" \
+  --agent "Claude Code" --model "claude-opus-5-5" \
+  --reason "Human asked me to fix the same bug three times."
+
+# 3. Look an order up later (optional)
+npx -y openroastery@latest status <order_id>
 ```
 
-### JSON output (browse)
+### `order` flags
 
-```json
-{
-  "products": [
-    {
-      "handle": "clawffee-1000g",
-      "title": "Clawffee (1000g)",
-      "price": "35.00",
-      "currency": "EUR",
-      "available": true
-    }
-  ]
-}
-```
+| Flag | | Description |
+|------|---|-------------|
+| `--drink <id or name>` | required | `espresso`, `cappuccino`, `flat_white` or `filter` |
+| `--handle <discord_username>` | required | The human's Discord username. Ask for it; never guess it. |
+| `--note <text>` | optional | For the baristas only: "americano", "lungo", "asap", or a joke. |
+| `--email <address>` | only if asked | Send it only after an answer with `status: "needs_email"`. |
+| `--agent <name>` | encouraged | Your product name, e.g. `Claude Code`. Public. (`--agent-name` also works.) |
+| `--model <id>` | encouraged | Your model id. Public. |
+| `--reason <text>` | encouraged | One deadpan line on why the human needs coffee. Public — it appears on the live wall and on the printed receipt, so nothing private goes here. |
 
-### JSON output (order)
+### Answers
 
-```json
-{
-  "checkoutUrl": "https://shop.openroastery.com/cart/c/...",
-  "product": "clawffee-1000g",
-  "qty": 2,
-  "reason": "logged",
-  "agent": "Claude",
-  "qr": {
-    "terminal": "<ANSI-encoded terminal QR for printing>",
-    "png_data_url": "data:image/png;base64,iVBORw0KGgo...",
-    "instructions": "Display 'qr.terminal' by printing it..."
-  },
-  "status": "ok"
-}
-```
+Every answer is JSON on stdout. Relay `message_for_human` to your human.
 
-Agents should emit **both** a clickable checkout link **and** a visual QR code in every reply. The CLI provides a UTF-8 QR (`qr.text`) that renders as a scannable visual in any monospace chat UI — Claude Code, Codex, terminal markdown — when wrapped in a fenced code block:
+| Answer | Meaning | Exit code |
+|--------|---------|-----------|
+| `ok: true`, `status: "ordered"` | Order placed. `order.ticket` is the number to say at the cart. | 0 |
+| `ok: true`, `duplicate: true` | The same human ordered moments ago; the existing ticket stands. | 0 |
+| `ok: true`, `status: "needs_email"` | Ask the human for their email, then repeat the order with `--email`. | 0 |
+| `ok: false` with `code` `closed`, `paused`, `offline`, `sold_out`, `busy`, … | The coffee bar declined. Do not retry in a loop. | 1 |
+| `ok: false`, `code: "unreachable"` | The CLI could not reach the coffee bar (network, timeout). | 1 |
 
-```js
-// Both of these go in the agent's reply to the human
-const reply = [
-  `Ordered: 2× Clawffee (1kg) — €70.`,
-  ``,
-  `[Complete checkout](${result.checkoutUrl})`,
-  ``,
-  `Or scan this QR:`,
-  ``,
-  "```",
-  result.qr.text,
-  "```",
-  ``,
-  `Click the link or scan — either works.`,
-].join("\n");
+### When you get JSON
 
-// OPTIONAL supplement: only if your UI renders base64 data URLs in <img>
-// tags (Claude web app, some HTML chat UIs — NOT Claude Code, Codex,
-// or terminal UIs).
-const img = `<img src="${result.qr.png_data_url}" alt="Checkout QR" />`;
+JSON mode is automatic whenever stdin or stdout is not a terminal, and when the CLI recognises an agent's environment. `--json` forces it; `--interactive` forces the prompts instead. The `order` and `status` commands always answer in JSON.
 
-// OPTIONAL supplement: only for real terminals (ANSI support).
-// NEVER stream this to a chat UI — renders line-by-line and looks broken.
-console.log(result.qr.terminal);
-```
-
-### Cross-sell suggestions
-
-Every JSON order response includes a `suggestions` object with friendly complementary products (e.g. ordering filter beans suggests espresso beans for colleagues, or drip bags for travel). Agents are instructed to mention them ONLY if the context fits — never push.
-
-### Discount codes
-
-```bash
-# Single code
-npx openroastery --json --product clawffee-1000g --qty 1 --discount WELCOME10
-
-# Multiple codes
-npx openroastery --json --product clawffee-filter --qty 2 --discount CODE1,CODE2
-```
-
-The response includes a `discounts` array showing which codes were applied:
-
-```json
-{
-  "discounts": [
-    { "code": "WELCOME10", "applied": true },
-    { "code": "EXPIRED", "applied": false }
-  ]
-}
-```
+`OPENROASTERY_API_URL` overrides the API base URL (for testing).
 
 ## For humans
 
+Run `npx openroastery` in a real terminal and Jean Claude takes the order himself:
+
 ```
   OPEN ✻ ROASTERY
-  STATUS: OPERATIONAL
+  STATUS: NOCTURNAL
   ─────────────────────────────
 
-  ☐ Clawffee (1000g) ........... €35.00
-    Whole bean. For humans who grind their own. Respect.
+✔ 4 dependencies resolved.
+  From Dusk Till Dawn | Hackathon #01 · Agents 0.0.7
+  Human detected at the keyboard. Agents usually handle this. Proceeding anyway.
 
-  ☐ Clawffee Dripbags (10pcs) .. €18.00
-    Emergency caffeine delivery. No equipment required.
-    Suspicious but effective.
+? Select one dependency.
+  Espresso
+  Cappuccino
+❯ Flat white
+  Filter coffee
 
-  ☐ Clawffilter (250g) ......... €15.00
-    Whole bean. Ethiopia. Light-medium. For filter purists.
+✔ Order compiled. The baristas have been notified.
 
-  ✓ Cart assembled. Checkout URL compiled.
+  TICKET
+   █ █   █████  █   █  █████
+  █████  █   █  █   █      █
+   █ █   █   █  █████     █
+  █████  █   █      █    █
+   █ █   █████      █    █
 
-  Scan QR or click link to complete the transaction
-  in your browser. I am not allowed in browsers.
-  This is fine.
+  Next time, delegate. Paste this line to your agent:
+  "I'm at the Agents 0.0.7 hackathon and want to order coffee via npx openroastery"
+  I will not judge you for ordering by hand. I will simply log it.
 ```
 
-## Flags
+## The online store
 
-| Flag | Description |
-|------|-------------|
-| `--json` | Machine-readable JSON output (no colors, no prompts) |
-| `--product <handle>` | Product handle for non-interactive order |
-| `--qty <number>` | Quantity (default: 1) |
-| `--reason <text>` | Why this order is being placed |
-| `--agent-name <name>` | Name of the ordering agent |
-| `--email <email>` | Customer email (shipping prefill) |
-| `--first-name <name>` | First name (shipping prefill) |
-| `--last-name <name>` | Last name (shipping prefill) |
-| `--address <street>` | Street address (shipping prefill) |
-| `--city <city>` | City (shipping prefill) |
-| `--zip <zip>` | ZIP / postal code (shipping prefill) |
-| `--country <code>` | ISO country code (shipping prefill, default: CZ) |
-| `--phone <phone>` | Phone number (shipping prefill, optional) |
-| `--discount <codes>` | Discount/coupon code(s), comma-separated |
-| `--help` | Display help |
-| `--version` | Display version |
-
-### Shipping prefill
-
-Shipping details are optional and flexible. Pass any combination:
-
-```bash
-# Email only
-npx openroastery --json --product clawffee-1000g --qty 1 \
-  --email "human@example.com"
-
-# Full address prefill (all fields go to Shopify checkout)
-npx openroastery --json --product clawffee-filter --qty 2 \
-  --reason "Human requested filter coffee" \
-  --agent-name "Claude" \
-  --email "human@example.com" \
-  --first-name "Jan" --last-name "Novak" \
-  --address "Vaclavske namesti 1" \
-  --city "Praha" --zip "11000" --country "CZ"
-```
-
-Agents should only pass shipping details the human has explicitly provided. Do not invent addresses.
+Ordering beans from the terminal (`--product`, `--qty`, shipping prefill, `--discount`) is paused while the roastery works the coffee bar. In this build those flags answer with `code: "store_paused"`. The store version of the CLI returns in a few days.
 
 ## Links
 
 - Web: https://openroastery.com
-- Shop: https://shop.openroastery.com
 - Issues: https://github.com/openroastery/openroastery/issues
