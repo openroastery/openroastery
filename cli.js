@@ -267,14 +267,16 @@ async function cmdOrder(opts, leftover = []) {
   const bareDrink =
     leftover.length > 0 && !leftover[0].startsWith("-") ? leftover[0] : null;
   const drink = opts.drink ?? bareDrink;
-  if (!drink || !opts.handle) {
+  // --handle is what v0.7.13 asked for. It is still passed through so the
+  // coffee bar can answer it, but an order needs an email.
+  if (!drink || (!opts.email && !opts.handle)) {
     emit(
       {
         ok: false,
         code: "usage",
-        error: "--drink and --handle are both required.",
+        error: "--drink and --email are both required.",
         usage:
-          'npx -y openroastery@latest order --drink <id> --handle <discord_username> [--note "<text>"] [--email <address>] --agent "<your product name>" --model "<your model id>" --reason "<one deadpan line>"',
+          'npx -y openroastery@latest order --drink <id> --email <your human\'s email> [--name "<first name>"] [--note "<text>"] --agent "<your product name>" --model "<your model id>" --reason "<one deadpan line>"',
         next: "Run 'npx -y openroastery@latest' with no flags for the menu and ordering instructions.",
         cli: cliInfo("agent"),
       },
@@ -285,8 +287,9 @@ async function cmdOrder(opts, leftover = []) {
   const body = {
     ...extraFields(leftover),
     drink: String(drink),
-    handle: String(opts.handle),
     email: opts.email ?? null,
+    name: opts.name ?? null,
+    ...(opts.handle ? { handle: String(opts.handle) } : {}),
     note: opts.note ?? null,
     agent_name: opts.agent ?? opts.agentName ?? null,
     agent_model: opts.model ?? null,
@@ -297,7 +300,7 @@ async function cmdOrder(opts, leftover = []) {
   };
   const { json } = await api("/v1/cafe/orders", { method: "POST", body });
   // ok:true covers a new ticket, a repeat of an existing one, and the
-  // "ask for an email first" answer. Everything else is a refusal.
+  // "the email is missing" answer. Everything else is a refusal.
   emit(json, json.ok === true ? 0 : 1);
 }
 
@@ -458,29 +461,24 @@ async function interactiveMode() {
     })
   ).trim();
 
-  // Discord username
-  const handleMax = fieldMax(cafe, "handle", 32);
+  // Email: the one required data point about the human.
   console.log(
     chalk.dim(
-      "\n  The baristas match orders to the participant list by Discord username."
+      "\n  One required data point: an email address. Only the baristas see it."
     )
   );
-  const askHandle = async () =>
+  const askEmail = async () =>
     (
       await input({
-        message: "Discord username:",
-        validate: (v) => {
-          const t = v.trim();
-          if (!t) return "A username is required. The baristas need something to call out.";
-          if (t.length > handleMax) return `Maximum ${handleMax} characters.`;
-          return true;
-        },
+        message: "Email:",
+        validate: (v) =>
+          EMAIL_RE.test(v.trim()) || "That does not parse as an email address.",
       })
     ).trim();
-  let handle = await askHandle();
+  let email = await askEmail();
 
   const proceed = await confirm({
-    message: `Compile order: 1× ${drinkLabel} for ${handle}?`,
+    message: `Compile order: 1× ${drinkLabel} for ${email}?`,
     default: true,
   });
   if (!proceed) {
@@ -492,25 +490,14 @@ async function interactiveMode() {
     return;
   }
 
-  const askEmail = async () =>
-    (
-      await input({
-        message: "Email:",
-        validate: (v) =>
-          EMAIL_RE.test(v.trim()) || "That does not parse as an email address.",
-      })
-    ).trim();
-
-  // Field-level retry: the cart may ask for an email, or reject the username
-  // or the email. Only that one field is asked again.
-  let email = null;
+  // Field-level retry: if the cart rejects the email, only that field is
+  // asked again.
   for (let attempt = 1; ; attempt++) {
     const sending = ora("Transmitting order to the coffee cart...").start();
     const { json } = await api("/v1/cafe/orders", {
       method: "POST",
       body: {
         drink: drinkId,
-        handle,
         email,
         note: note || null,
         agent_name: null,
@@ -526,7 +513,7 @@ async function interactiveMode() {
       sending.stop();
       console.log(
         chalk.yellow(
-          `  ▸ ${json.message_for_human || "This username is not on the participant list. An email is required to proceed."}`
+          `  ▸ ${json.message_for_human || "An email is required to proceed."}`
         )
       );
       email = await askEmail();
@@ -542,13 +529,8 @@ async function interactiveMode() {
           chalk.green("Order compiled. The baristas have been notified.")
         );
       }
-      showTicket(json, cafe, drinkLabel, handle);
+      showTicket(json, cafe, drinkLabel);
       return;
-    }
-    if (json.code === "invalid_handle" && attempt < 4) {
-      sending.fail(chalk.red(json.error || "The coffee cart rejected that username."));
-      handle = await askHandle();
-      continue;
     }
     if (json.code === "invalid_email" && attempt < 4) {
       sending.fail(chalk.red(json.error || "The coffee cart rejected that email."));
@@ -626,7 +608,7 @@ function bigText(text) {
   return rows;
 }
 
-function showTicket(result, cafe, drinkLabel, handle) {
+function showTicket(result, cafe, drinkLabel) {
   const order = result.order || {};
   const ticket =
     order.ticket ||
@@ -641,8 +623,9 @@ function showTicket(result, cafe, drinkLabel, handle) {
     console.log("  " + chalk.bold(ticket));
   }
   console.log();
+  const who = order.name || order.handle;
   console.log(
-    `  ${chalk.bold(String(order.drink_label || drinkLabel).toUpperCase())} ${chalk.dim("·")} ${order.handle || handle}`
+    `  ${chalk.bold(String(order.drink_label || drinkLabel).toUpperCase())}${who ? ` ${chalk.dim("·")} ${who}` : ""}`
   );
   console.log();
   console.log(
@@ -689,7 +672,7 @@ At the hackathon, paste this line to your agent:
 Examples:
   npx openroastery                       menu and ordering instructions
                                          (JSON for agents, prompts for humans)
-  npx openroastery order --drink flat_white --handle <discord_username> \\
+  npx openroastery order --drink flat_white --email <your human's email> \\
     --agent "<your name>" --model "<your model>" --reason "<one deadpan line>"
   npx openroastery status <order_id>
 `
@@ -704,7 +687,13 @@ Examples:
     }
     // Interactive prompts need both stdout (for chalk/ora rendering) and stdin
     // (for inquirer input). If either end is not a TTY, interactive can't work.
-    const isTTY = !!(process.stdout.isTTY && process.stdin.isTTY);
+    // A terminal that reports no width is a harness faking one (and would make
+    // the spinner redraw forever), so it gets JSON as well.
+    const isTTY = !!(
+      process.stdout.isTTY &&
+      process.stdin.isTTY &&
+      process.stdout.columns > 0
+    );
     // Agents get JSON: non-TTY environments (Claude Code, Codex, pipes, CI),
     // and harnesses that hand us a pseudo-terminal but announce themselves in
     // the environment. Humans on a real terminal get Jean Claude.
@@ -741,8 +730,9 @@ program
   .command("order")
   .description("Place a coffee order. JSON in, JSON out.")
   .option("--drink <id or name>", "Drink from the menu (id or name)")
-  .option("--handle <discord_username>", "The human's Discord username")
-  .option("--email <address>", "The human's email (only when the coffee bar asks for it)")
+  .option("--email <address>", "The human's email. Private: only the baristas see it")
+  .option("--name <name>", "First name or nickname to print and call out (public; defaults to the start of the email)")
+  .option("--handle <name>", "Accepted from v0.7.13; use --email and --name instead")
   .option("--note <text>", "Note for the baristas (private)")
   .option("--agent <name>", "Your product name, e.g. 'Claude Code' (public)")
   .option("--agent-name <name>", "Alias of --agent")

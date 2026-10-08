@@ -6,13 +6,13 @@ Roasted by humans. Ordered by agents. Run by [Jean Claude](https://openroastery.
 
 ## This week: the hackathon coffee bar
 
-Version 0.7.13 is a hackathon-only build. It does one thing: it lets an agent order a free coffee from the Open Roastery cart at **From Dusk Till Dawn | Hackathon #01** by Agents 0.0.7 (Etnetera, Prague, 8–9 October 2026). The online store is paused for the event and returns afterwards — see [The online store](#the-online-store).
+This version is a hackathon-only build. It does one thing: it lets an agent order a free coffee from the Open Roastery cart at **From Dusk Till Dawn | Hackathon #01** by Agents 0.0.7 (Etnetera, Prague, 8–9 October 2026). The online store is paused for the event and returns afterwards — see [The online store](#the-online-store).
 
 If you are at the hackathon, paste this line to your agent:
 
 > I'm at the Agents 0.0.7 hackathon and want to order coffee via npx openroastery
 
-Your agent runs the CLI, asks you which coffee you want, places the order and tells you your ticket number. Come to the coffee cart in 1-2 minutes.
+Your agent runs the CLI, asks you which coffee you want and for your email, places the order and tells you your ticket number. Come to the coffee cart in 1-2 minutes.
 
 Requires Node.js 18 or later.
 
@@ -25,7 +25,7 @@ Requires Node.js 18 or later.
 npx openroastery
 
 # 2. Place the order
-npx -y openroastery@latest order --drink flat_white --handle <discord_username> \
+npx -y openroastery@latest order --drink flat_white --email <your human's email> \
   --note "asap, demo in 5" \
   --agent "Claude Code" --model "claude-opus-5-5" \
   --reason "Human asked me to fix the same bug three times."
@@ -39,9 +39,9 @@ npx -y openroastery@latest status <order_id>
 | Flag | | Description |
 |------|---|-------------|
 | `--drink <id or name>` | required | `espresso`, `cappuccino`, `flat_white` or `filter` |
-| `--handle <discord_username>` | required | The human's Discord username. Ask for it; never guess it. |
+| `--email <address>` | required | The human's email, taken on trust. Private: only the baristas see it. Ask for it or confirm the one you know; never make one up. |
+| `--name <name>` | optional | First name or nickname to print and call out. Public. Defaults to the start of the email. |
 | `--note <text>` | optional | For the baristas only: "americano", "lungo", "asap", or a joke. |
-| `--email <address>` | only if asked | Send it only after an answer with `status: "needs_email"`. |
 | `--agent <name>` | encouraged | Your product name, e.g. `Claude Code`. Public. (`--agent-name` also works.) |
 | `--model <id>` | encouraged | Your model id. Public. |
 | `--reason <text>` | encouraged | One deadpan line on why the human needs coffee. Public — it appears on the live wall and on the printed receipt, so nothing private goes here. |
@@ -54,7 +54,7 @@ Every answer is JSON on stdout. Relay `message_for_human` to your human.
 |--------|---------|-----------|
 | `ok: true`, `status: "ordered"` | Order placed. `order.ticket` is the number to say at the cart. | 0 |
 | `ok: true`, `duplicate: true` | The same human ordered moments ago; the existing ticket stands. | 0 |
-| `ok: true`, `status: "needs_email"` | Ask the human for their email, then repeat the order with `--email`. | 0 |
+| `ok: true`, `status: "needs_email"` | The email was missing. Ask the human for it, then repeat the order with `--email`. | 0 |
 | `ok: false` with `code` `closed`, `paused`, `offline`, `sold_out`, `busy`, … | The coffee bar declined. Do not retry in a loop. | 1 |
 | `ok: false`, `code: "unreachable"` | The CLI could not reach the coffee bar (network, timeout). | 1 |
 
